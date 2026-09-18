@@ -1,0 +1,21 @@
+{
+  "name": "@agent-conductor/adapter-fake",
+  "version": "0.0.0",
+  "description": "Scripted worker adapter for core tests and conformance fixtures.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@agent-conductor/adapter-api": "workspace:*"
+  }
+}

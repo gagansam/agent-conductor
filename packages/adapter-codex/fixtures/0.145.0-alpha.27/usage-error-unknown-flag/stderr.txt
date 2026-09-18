@@ -1,0 +1,8 @@
+error: unexpected argument '--no-such-flag' found
+
+  tip: to pass '--no-such-flag' as a value, use '-- --no-such-flag'
+
+Usage: codex exec [OPTIONS] [PROMPT]
+       codex exec [OPTIONS] <COMMAND> [ARGS]
+
+For more information, try '--help'.

@@ -1,0 +1,18 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+    "paths": {
+      "@agent-conductor/adapter-api": ["./packages/adapter-api/src/index.ts"],
+      "@agent-conductor/adapter-api/conformance": ["./packages/adapter-api/src/conformance/index.ts"],
+      "@agent-conductor/adapter-fake": ["./packages/adapter-fake/src/index.ts"],
+      "@agent-conductor/adapter-claude": ["./packages/adapter-claude/src/index.ts"],
+      "@agent-conductor/adapter-codex": ["./packages/adapter-codex/src/index.ts"],
+      "@agent-conductor/core": ["./packages/core/src/index.ts"]
+    }
+  },
+  "include": ["packages/*/src/**/*.ts", "packages/*/test/**/*.ts", "vitest.config.ts"]
+}

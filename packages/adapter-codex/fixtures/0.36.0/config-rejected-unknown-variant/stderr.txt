@@ -1,0 +1,6 @@
+2026-09-18T07:40:32.735236Z ERROR codex_core::config: Failed to deserialize overridden config: unknown variant `xhigh`, expected one of `minimal`, `low`, `medium`, `high`
+in `model_reasoning_effort`
+
+Error: unknown variant `xhigh`, expected one of `minimal`, `low`, `medium`, `high`
+in `model_reasoning_effort`
+

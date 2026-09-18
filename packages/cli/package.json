@@ -1,0 +1,28 @@
+{
+  "name": "@agent-conductor/cli",
+  "version": "0.0.0",
+  "description": "The conductor command line.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@agent-conductor/adapter-api": "workspace:*",
+    "@agent-conductor/adapter-claude": "workspace:*",
+    "@agent-conductor/adapter-codex": "workspace:*",
+    "@agent-conductor/adapter-fake": "workspace:*",
+    "@agent-conductor/core": "workspace:*"
+  },
+  "bin": {
+    "conductor": "./dist/bin.js"
+  }
+}

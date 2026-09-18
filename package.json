@@ -1,0 +1,22 @@
+{
+  "name": "agent-conductor",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Local orchestrator that drives vendor coding-agent CLIs through a verification-gated implement/review loop.",
+  "type": "module",
+  "engines": { "node": ">=22.13" },
+  "packageManager": "pnpm@11.1.2",
+  "scripts": {
+    "build": "tsc -b packages/adapter-api packages/adapter-fake packages/adapter-claude packages/adapter-codex packages/core packages/cli",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "conductor": "node packages/cli/dist/bin.js"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.1",
+    "@types/picomatch": "^4.0.3",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.1"
+  }
+}

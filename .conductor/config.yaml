@@ -1,0 +1,36 @@
+# How agent-conductor verifies changes to itself. See docs/14-config-reference.md.
+version: 1
+
+setup:
+  run: pnpm install --frozen-lockfile --prefer-offline
+  timeout_ms: 300000
+
+verification:
+  - id: typecheck
+    kind: typecheck
+    run: pnpm typecheck
+    timeout_ms: 300000
+    parse: tsc
+  - id: test
+    kind: test
+    run: pnpm test
+    timeout_ms: 600000
+
+repro:
+  allowed_paths: ["packages/*/test/**"]
+  max_files: 3
+
+instructions:
+  sources:
+    - AGENTS.md
+
+policy:
+  network: false
+  allowed_commands:
+    - "pnpm typecheck*"
+    - "pnpm test*"
+    - "pnpm build*"
+    - "pnpm vitest*"
+    - "pnpm exec vitest*"
+    - "pnpm exec tsc*"
+    - "node *"

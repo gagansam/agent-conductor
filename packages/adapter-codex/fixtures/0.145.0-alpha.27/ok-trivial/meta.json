@@ -1,0 +1,6 @@
+{
+  "exit_code": 0,
+  "recorded_at": "2026-09-07T00:00:00Z",
+  "source": "captured by hand during the design session; see docs/13-environment-findings.md",
+  "expect": { "classification": "ok", "final_text": "OK", "has_usage": true }
+}

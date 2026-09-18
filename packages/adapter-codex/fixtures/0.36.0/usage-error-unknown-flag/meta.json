@@ -1,0 +1,5 @@
+{
+  "exit_code": 2,
+  "recorded_at": "2026-09-18T07:40:32Z",
+  "expect": { "classification": "cli_usage_error" }
+}

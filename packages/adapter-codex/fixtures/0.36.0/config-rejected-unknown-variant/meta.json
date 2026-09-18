@@ -1,0 +1,5 @@
+{
+  "exit_code": 1,
+  "recorded_at": "2026-09-18T07:40:32Z",
+  "expect": { "classification": "config_rejected" }
+}

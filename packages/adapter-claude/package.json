@@ -1,0 +1,22 @@
+{
+  "name": "@agent-conductor/adapter-claude",
+  "version": "0.0.0",
+  "description": "Worker adapter for Claude Code.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "files": [
+    "dist",
+    "fixtures"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@agent-conductor/adapter-api": "workspace:*"
+  }
+}

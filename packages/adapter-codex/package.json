@@ -1,0 +1,22 @@
+{
+  "name": "@agent-conductor/adapter-codex",
+  "version": "0.0.0",
+  "description": "Worker adapter for Codex CLI.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "files": [
+    "dist",
+    "fixtures"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@agent-conductor/adapter-api": "workspace:*"
+  }
+}

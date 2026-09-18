@@ -1,0 +1,23 @@
+{
+  "name": "@agent-conductor/adapter-api",
+  "version": "0.0.0",
+  "description": "The worker adapter contract: types, a CLI process helper, and the conformance harness.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./conformance": {
+      "types": "./dist/conformance/index.d.ts",
+      "default": "./dist/conformance/index.js"
+    }
+  },
+  "dependencies": {}
+}

@@ -1,0 +1,9 @@
+{"model":"gpt-5","reasoning summaries":"auto","sandbox":"read-only","provider":"openai","approval":"never","workdir":"/tmp/conductor-live","reasoning effort":"none"}
+{"prompt":"Reply OK\n"}
+{"id":"0","msg":{"type":"task_started","model_context_window":272000}}
+{"id":"0","msg":{"type":"stream_error","message":"stream error: unexpected status 400 Bad Request: {\"detail\":\"The 'gpt-5' model is not supported when using Codex with a ChatGPT account.\"}; retrying 1/5 in 200ms…"}}
+{"id":"0","msg":{"type":"stream_error","message":"stream error: unexpected status 400 Bad Request: {\"detail\":\"The 'gpt-5' model is not supported when using Codex with a ChatGPT account.\"}; retrying 2/5 in 438ms…"}}
+{"id":"0","msg":{"type":"stream_error","message":"stream error: unexpected status 400 Bad Request: {\"detail\":\"The 'gpt-5' model is not supported when using Codex with a ChatGPT account.\"}; retrying 3/5 in 856ms…"}}
+{"id":"0","msg":{"type":"stream_error","message":"stream error: unexpected status 400 Bad Request: {\"detail\":\"The 'gpt-5' model is not supported when using Codex with a ChatGPT account.\"}; retrying 4/5 in 1.713s…"}}
+{"id":"0","msg":{"type":"stream_error","message":"stream error: unexpected status 400 Bad Request: {\"detail\":\"The 'gpt-5' model is not supported when using Codex with a ChatGPT account.\"}; retrying 5/5 in 3.25s…"}}
+{"id":"0","msg":{"type":"error","message":"unexpected status 400 Bad Request: {\"detail\":\"The 'gpt-5' model is not supported when using Codex with a ChatGPT account.\"}"}}

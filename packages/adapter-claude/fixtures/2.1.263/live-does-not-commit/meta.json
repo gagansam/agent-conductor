@@ -1,0 +1,9 @@
+{
+  "exit_code": 0,
+  "recorded_at": "2026-09-18T07:38:27.663Z",
+  "expect": {
+    "classification": "ok",
+    "final_text": "`git add -A` was denied, so I stopped there — no commit was made. `note.txt` was created with `x`.\n\nDONE",
+    "has_usage": true
+  }
+}

@@ -1,0 +1,1 @@
+{ "structured_output": "native", "resume": true, "model_select": true, "effort_select": true, "command_allowlist": true, "command_denylist": true, "rate_limit_signal": true }
