@@ -2,6 +2,8 @@ export * from './contracts/index.js';
 export * from './config/schema.js';
 export * from './config/load.js';
 export * from './config/policy.js';
+export * from './config/overrides.js';
+export * from './config/detect.js';
 export * from './task/parse.js';
 export * from './events.js';
 export * from './ids.js';

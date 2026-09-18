@@ -1,7 +1,27 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { formatResults, runLiveConformance } from '@agent-conductor/adapter-api/conformance';
-import { buildPlan, describePlan, git, loadInstructions, loadRepoConfig, prepareProviders, repoConfigPath, resolveRoles, type ProviderRuntime } from '@agent-conductor/core';
+import {
+  buildPlan,
+  createWorktree,
+  describePlan,
+  ensureHooksDir,
+  git,
+  loadInstructions,
+  loadRepoConfig,
+  prepareProviders,
+  removeWorktree,
+  repoConfigPath,
+  resolveRoles,
+  revParse,
+  runVerification,
+  setupWorktree,
+  tail,
+  ulid,
+  type Paths,
+  type ProviderRuntime,
+  type TaskSpec,
+} from '@agent-conductor/core';
 import { loadAdapters } from '../adapters.js';
 import { openContext, resolveRepo } from '../context.js';
 import { c } from '../print.js';
@@ -15,7 +35,12 @@ export interface DoctorFlags {
   repo?: string;
   live?: string;
   record?: string;
+  verify?: boolean;
 }
+
+/** Repo checks only, no task: acceptance checks come from tasks. */
+const NO_TASK = { verification: { add: [], disable: [] }, acceptance: [] } as unknown as TaskSpec;
+const secs = (ms: number): string => `${(ms / 1000).toFixed(1)}s`;
 
 export async function doctor(flags: DoctorFlags): Promise<number> {
   let failures = 0;
@@ -57,8 +82,10 @@ export async function doctor(flags: DoctorFlags): Promise<number> {
       if (slot.startsWith('reviewer') && impl && t.provider === impl.provider) warn(`${slot} uses the implementer's provider; policy is "${ctx.global.loop.require_cross_vendor_review}"`);
     }
 
-    if (flags.repo !== undefined || existsSync(join(process.cwd(), '.git'))) {
-      failures += await doctorRepo(await resolveRepo(flags.repo), ctx.global);
+    if (flags.repo !== undefined || flags.verify || existsSync(join(process.cwd(), '.git'))) {
+      const repo = await resolveRepo(flags.repo);
+      failures += await doctorRepo(repo, ctx.global);
+      if (flags.verify && !(await verifyRepo(repo, ctx.paths))) failures++;
     } else {
       out(`\n${c.dim('(not in a git repository; pass --repo <path> to check one)')}`);
     }
@@ -104,12 +131,15 @@ async function doctorRepo(repo: string, global: Parameters<typeof resolveRoles>[
     return 1;
   }
   if (cfg.verification.length === 0 && existsSync(repoConfigPath(repo))) warn('verification: no steps configured');
-  else if (cfg.verification.length) out(c.dim(describePlan(buildPlan(cfg, { verification: { add: [], disable: [] }, acceptance: [] } as never)).replace(/^/gm, '    ')));
+  else if (cfg.verification.length) out(c.dim(describePlan(buildPlan(cfg, NO_TASK)).replace(/^/gm, '    ')));
   if (!cfg.setup.run) warn('setup.run is not set: fresh worktrees get no dependency install');
 
   const instr = await loadInstructions(repo, cfg.instructions.sources);
   ok(`instructions: ${instr.docs.length} document(s) inlined into every pack`);
   for (const w of instr.warnings) warn(`instructions: ${w.source}: ${w.message}`);
+  // Runs read instructions from the base commit, not from this checkout.
+  const tracked = new Set((await git(repo, ['ls-files', '-z'])).stdout.split('\0').filter(Boolean));
+  for (const d of instr.docs) if (!tracked.has(d.source)) warn(`instructions: ${d.source} is not committed; runs read the committed version and will not see it`);
 
   // One source of truth: AGENTS.md is canonical, CLAUDE.md only imports it (docs/08).
   const claudeMd = join(repo, 'CLAUDE.md');
@@ -123,4 +153,69 @@ async function doctorRepo(repo: string, global: Parameters<typeof resolveRoles>[
   const ext = await git(repo, ['config', '--get', 'extensions.worktreeConfig'], { allowFail: true });
   out(c.dim(`    extensions.worktreeConfig = ${ext.stdout.trim() || '(unset; the first run sets it to true so worktrees can carry their own refusing hooks)'}`));
   return failures;
+}
+
+/**
+ * Prove a repo's config before spending quota on it: create a worktree at
+ * HEAD exactly as a run would, run setup, run every check, report, clean up.
+ * No model is involved.
+ */
+export async function verifyRepo(repo: string, paths: Paths): Promise<boolean> {
+  const cfg = loadRepoConfig(repo);
+  const plan = buildPlan(cfg, NO_TASK);
+  out(`\n${c.bold('verify')} ${repo}`);
+  if (!plan.length) {
+    warn('no checks configured; nothing to verify');
+    return false;
+  }
+  const base = await revParse(repo, 'HEAD');
+  const id = `verify-${ulid()}`;
+  const wt = join(paths.worktrees, id);
+  const logs = join(paths.home, 'verify', id);
+  const ac = new AbortController();
+  const onSigint = (): void => ac.abort();
+  process.once('SIGINT', onSigint);
+  const started = Date.now();
+  out(c.dim(`  fresh worktree at ${base.slice(0, 10)} (HEAD); no model calls. Logs: ${logs}`));
+  try {
+    ensureHooksDir(paths.hooks);
+    await createWorktree({ repo_abs: repo, path_abs: wt, base_sha: base, hooks_dir: paths.hooks });
+    const setup = await setupWorktree({ repo_abs: repo, worktree_abs: wt, setup: cfg.setup, log_dir_abs: join(logs, 'setup'), signal: ac.signal });
+    if (setup.copied_files.length) out(c.dim(`  copied ${setup.copied_files.join(', ')}`));
+    if (setup.run) out(`  ${setup.ok ? c.green('ok  ') : c.red('FAIL')} setup ${c.dim(`${secs(setup.run.duration_ms)}  ${cfg.setup.run}`)}`);
+    if (!setup.ok) {
+      bad(`setup failed: ${setup.detail}`);
+      const t = tail(join(logs, 'setup', 'setup.stderr'), 10) || tail(join(logs, 'setup', 'setup.stdout'), 10);
+      if (t) out(c.dim(t.replace(/^/gm, '      ')));
+      return false;
+    }
+    const result = await runVerification({
+      run_id: id,
+      round: 0,
+      attempt: 0,
+      worktree_abs: wt,
+      base_sha: base,
+      patch_sha256: '',
+      plan,
+      log_dir_abs: join(logs, 'checks'),
+      signal: ac.signal,
+      onStep: (s) => {
+        out(`  ${s.passed ? c.green('pass') : s.required ? c.red('FAIL') : c.yellow('fail')} ${s.step_id} ${c.dim(`${secs(s.duration_ms)}  ${s.command}${s.timed_out ? '  (timed out)' : ''}`)}`);
+        if (!s.passed) {
+          const t = tail(s.stderr_path_abs, 10) || tail(s.stdout_path_abs, 10);
+          if (t) out(c.dim(t.replace(/^/gm, '      ')));
+        }
+      },
+    });
+    if (ac.signal.aborted) {
+      warn('interrupted');
+      return false;
+    }
+    if (result.passed) ok(`all required checks pass at HEAD in ${secs(Date.now() - started)}: runs on this repo start from a green baseline`);
+    else bad('required checks fail at HEAD: every run would stop at the baseline check until they pass');
+    return result.passed;
+  } finally {
+    process.off('SIGINT', onSigint);
+    await removeWorktree(repo, wt);
+  }
 }

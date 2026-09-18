@@ -9,7 +9,7 @@ correction is listed here.
 
 Milestone 1 (the walking skeleton in [10-milestones.md](10-milestones.md)) is
 built, plus the parts of milestone 2 that came almost free once the pieces
-existed. 60 tests pass (`pnpm test`); `pnpm typecheck` and `pnpm build` are
+existed. 79 tests pass (`pnpm test`); `pnpm typecheck` and `pnpm build` are
 clean.
 
 | Package | State |
@@ -19,7 +19,7 @@ clean.
 | `adapter-claude` | Detect, capability probe from `--help`, argv with droppable optional flags, stream-json parser, classifier. **Passes live conformance on 2.1.263** |
 | `adapter-codex` | Same, for both JSONL dialects (0.3x `{id,msg}` and 0.1xx thread/turn/item), isolated `CODEX_HOME` with symlinked auth. Passes offline conformance on 0.36.0 and 0.145.0. **Live success path not yet verified** |
 | `core` | zod contracts + JSON Schema export; config and task parsing; worktree isolation with refusing hooks; temp-index patch extraction; harvest with tamper restore; audit; pack rendering with instruction inlining and lint; verifier with junit / tsc / eslint parsers; confirmer; dispatcher with DB leases, supervision and two retry policies; SQLite store (full schema from doc 07); the round engine |
-| `cli` | `init`, `doctor` (`--live`, `--record`), `run`, `list`, `show`, `apply` |
+| `cli` | `init` (interactive: global defaults, then per-repo config detected from manifests and confirmed question by question), `doctor` (`--live`, `--record`, `--verify`), `run` (with `-i/--implementer`, `-r/--reviewer` role overrides), `list`, `show`, `apply` |
 
 Engine behaviour that is implemented and tested: baseline verification,
 fix sub-rounds while verification is red, review only on green, parallel

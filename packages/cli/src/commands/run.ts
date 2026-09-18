@@ -1,6 +1,6 @@
 import { createInterface } from 'node:readline/promises';
 import { resolve } from 'node:path';
-import { parseTaskFile, runTask, type GateHandler } from '@agent-conductor/core';
+import { applyRoleOverrides, loadRepoConfig, parseTaskFile, resolveRoles, runTask, type GateHandler, type ResolvedTarget } from '@agent-conductor/core';
 import { loadAdapters } from '../adapters.js';
 import { openContext, resolveRepo } from '../context.js';
 import { c, consoleObserver, findingLine, printSummary } from '../print.js';
@@ -11,7 +11,12 @@ export interface RunFlags {
   noGates: boolean;
   skipBaseline: boolean;
   json: boolean;
+  implementer?: string;
+  reviewer?: string;
 }
+
+const describeTarget = (t: ResolvedTarget): string =>
+  `${t.provider}/${t.model_id === '' ? '(CLI default model)' : t.model_id}${t.effort ? ` effort ${t.effort}` : ''}`;
 
 const interactiveGate: GateHandler = async (req) => {
   process.stdout.write(`\n${c.yellow(`GATE ${req.gate}`)}  ${req.summary}\n`);
@@ -42,14 +47,26 @@ export async function run(taskFile: string, flags: RunFlags): Promise<number> {
   process.on('SIGTERM', onSigint);
   try {
     const repo = await resolveRepo(flags.repo);
-    const task = parseTaskFile(resolve(taskFile), { repo_abs: repo, global: ctx.global });
-    const needed = new Set(Object.values({ ...ctx.global.roles, ...task.routing }).map((r) => r.provider));
-    const adapters = await loadAdapters(ctx.global, [...needed]);
+    const repoCfg = loadRepoConfig(repo);
+    const parsed = parseTaskFile(resolve(taskFile), { repo_abs: repo, global: ctx.global });
+    const { global, task, notes } = applyRoleOverrides(ctx.global, repoCfg, parsed, {
+      ...(flags.implementer ? { implementer: flags.implementer } : {}),
+      ...(flags.reviewer ? { reviewer: flags.reviewer } : {}),
+    });
+    const roles = resolveRoles(global, repoCfg, task.routing);
+    const reviewers = roles.reviewers.slice(0, task.budget.max_reviewers);
+    if (!flags.json) {
+      for (const n of notes) process.stdout.write(`${c.yellow('note')} ${n}
+`);
+      const review = reviewers.length ? reviewers.map(describeTarget).join(', ') : 'none (implement → verify only)';
+      process.stdout.write(`${c.dim('roles')}  implementer ${describeTarget(roles.implementer)}  ·  reviewer ${review}\n`);
+    }
+    const adapters = await loadAdapters(global, [roles.implementer.provider, ...reviewers.map((r) => r.provider)]);
     const gate = !flags.noGates && process.stdin.isTTY && process.stdout.isTTY ? interactiveGate : undefined;
     const summary = await runTask(task, {
       store: ctx.store,
       paths: ctx.paths,
-      global: ctx.global,
+      global,
       adapters,
       observer: flags.json ? () => {} : consoleObserver({ verbose: flags.verbose }),
       ...(gate ? { gate } : {}),

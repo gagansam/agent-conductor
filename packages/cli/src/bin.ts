@@ -9,11 +9,17 @@ import { list, show } from './commands/show.js';
 
 const USAGE = `conductor — drive coding-agent CLIs through an implement → verify → review loop
 
-  conductor init                         write a starter ~/.conductor/config.yaml
+  conductor init [--repo <path>] [-y|--yes] [--force]
+                                         set up ~/.conductor/config.yaml and a repo's .conductor/config.yaml,
+                                         asking about each detected default (--yes takes them all)
   conductor doctor [--repo <path>]       check CLIs, capabilities, roles, repo config, instructions
+           [--verify]                    run setup + every check in a fresh worktree at HEAD (no model calls)
            [--live <provider>]           run live conformance against a provider (uses quota)
            [--record <dir>]              save the live runs as offline fixtures
   conductor run <task.md> [--repo <path>] [--verbose] [--no-gates] [--skip-baseline] [--json]
+           [-i|--implementer <provider>/<model>[:<effort>]]   e.g. claude/opus:high
+           [-r|--reviewer <provider>/<model>[:<effort>] | none]  e.g. codex/default, or none to skip review
+                                         <model> is a label from config or a raw model id
   conductor list [--json]
   conductor show [<run>] [--advice] [--json]      <run> may be the last few characters of a run id
   conductor apply [<run>] [--3way] [--force]      apply the patch to your checkout; stages nothing
@@ -28,6 +34,8 @@ async function main(argv: string[]): Promise<number> {
     allowPositionals: true,
     options: {
       repo: { type: 'string' },
+      implementer: { type: 'string', short: 'i' },
+      reviewer: { type: 'string', short: 'r' },
       live: { type: 'string' },
       record: { type: 'string' },
       verbose: { type: 'boolean', short: 'v', default: false },
@@ -37,6 +45,8 @@ async function main(argv: string[]): Promise<number> {
       advice: { type: 'boolean', default: false },
       '3way': { type: 'boolean', default: false },
       force: { type: 'boolean', default: false },
+      yes: { type: 'boolean', short: 'y', default: false },
+      verify: { type: 'boolean', default: false },
       help: { type: 'boolean', short: 'h', default: false },
     },
   });
@@ -44,13 +54,13 @@ async function main(argv: string[]): Promise<number> {
 
   switch (command) {
     case 'init':
-      return init();
+      return init({ ...(values.repo ? { repo: values.repo } : {}), yes: values.yes, force: values.force });
     case 'doctor':
-      return doctor({ ...(values.repo ? { repo: values.repo } : {}), ...(values.live ? { live: values.live } : {}), ...(values.record ? { record: values.record } : {}) });
+      return doctor({ ...(values.repo ? { repo: values.repo } : {}), ...(values.live ? { live: values.live } : {}), ...(values.record ? { record: values.record } : {}), verify: values.verify });
     case 'run': {
       const file = positionals[0];
       if (!file) return process.stderr.write('usage: conductor run <task.md>\n'), 64;
-      return run(file, { ...(values.repo ? { repo: values.repo } : {}), verbose: values.verbose, noGates: values['no-gates'], skipBaseline: values['skip-baseline'], json: values.json });
+      return run(file, { ...(values.repo ? { repo: values.repo } : {}), verbose: values.verbose, noGates: values['no-gates'], skipBaseline: values['skip-baseline'], json: values.json, ...(values.implementer ? { implementer: values.implementer } : {}), ...(values.reviewer ? { reviewer: values.reviewer } : {}) });
     }
     case 'list':
       return list({ json: values.json });

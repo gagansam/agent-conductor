@@ -28,28 +28,56 @@ Requires Node ≥ 22.13, pnpm, git, and at least one of `claude` / `codex` insta
 pnpm install && pnpm build
 alias conductor="node $PWD/packages/cli/dist/bin.js"
 
-conductor init                        # writes ~/.conductor/config.yaml; picks the newest codex binary it finds
-conductor doctor --repo ~/code/myrepo # CLIs, capabilities, roles, repo config, instruction sources
+conductor init --repo ~/code/myrepo   # asks for your defaults, writes both config files, then proves them
 conductor doctor --live claude        # optional: two small prompts proving the adapter on your machine
 ```
 
-In the repository you want work done in, add `.conductor/config.yaml` saying how to verify a change
-([reference](docs/14-config-reference.md); this repo's [own](.conductor/config.yaml) is a small example):
+`conductor init` writes `~/.conductor/config.yaml` (default implementer and reviewer) and the repository's
+`.conductor/config.yaml`. It reads the repo's `package.json` / `pyproject.toml` / lockfiles, shows each detected
+setup command, check and instruction file, and lets you keep, replace or remove it. It ends by running setup and
+every check in a fresh worktree at `HEAD`, with no model calls, so you know runs will start from a green baseline.
+`--yes` takes every default without asking; `conductor doctor --repo <path> --verify` repeats the proof later.
+
+For a pnpm repo with `typecheck`, `lint` and `test` scripts, the generated `.conductor/config.yaml` is
+(comments trimmed; [reference](docs/14-config-reference.md)):
 
 ```yaml
 version: 1
 setup:
-  run: pnpm install --frozen-lockfile --prefer-offline
-verification:
-  - { id: typecheck, kind: typecheck, run: "pnpm tsc --noEmit", parse: tsc }
-  - { id: unit, kind: test, run: "pnpm vitest run" }
+  run: "pnpm install --frozen-lockfile --prefer-offline"   # from pnpm-lock.yaml
+  timeout_ms: 600000
+verification:                                              # the definition of done, in order
+  - id: "typecheck"
+    kind: typecheck
+    run: "pnpm run typecheck"   # from package.json scripts.typecheck
+    timeout_ms: 600000
+    parse: tsc
+  - id: "lint"
+    kind: lint
+    run: "pnpm run lint"   # from package.json scripts.lint
+    timeout_ms: 600000
+  - id: "test"
+    kind: test
+    run: "pnpm run test"   # from package.json scripts.test
+    timeout_ms: 1200000
 repro:
-  allowed_paths: ["tests/**", "src/**/__repro__/**"]   # where a reviewer may put reproduction tests
+  allowed_paths: ["tests/**", "**/__repro__/**"]           # where a reviewer may add failing tests
 instructions:
-  sources: ["AGENTS.md"]                                # inlined, identically, into every worker's context
+  sources:
+    - "AGENTS.md"                                          # committed markdown given to every worker
 policy:
-  allowed_commands: ["pnpm vitest*", "pnpm tsc*", "node *"]
+  network: false
+  allowed_commands:                                        # what Claude workers may run
+    - "pnpm run typecheck*"
+    - "pnpm run lint*"
+    - "pnpm run test*"
+    - "pnpm exec vitest*"
+    - "pnpm exec tsc*"
+    - "node *"
 ```
+
+Commit it, or keep it local: `init` offers to add `.conductor/` to the clone's local exclude file. Runs read it
+from your working copy either way.
 
 Write a task ([format](docs/03-contracts.md#8-example-a-task-file)):
 
@@ -69,6 +97,9 @@ Run it:
 
 ```sh
 conductor run task.md --repo ~/code/myrepo
+conductor run task.md -i claude/opus:high -r codex/default   # pick implementer / reviewer for this run
+conductor run task.md -r none                                # implement → verify only, no review
+conductor list            # every run, across repos
 conductor show            # rounds, workers, checks, findings with their confirmation status
 conductor apply           # patch onto your checkout; nothing staged, nothing committed
 ```

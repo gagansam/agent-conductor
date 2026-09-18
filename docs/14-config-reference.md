@@ -70,6 +70,14 @@ paths:
 
 ## `<repo>/.conductor/config.yaml`
 
+Written by `conductor init --repo <path>`, which detects setup, checks, test
+directories and instruction files from the repo's manifests and asks about
+each one; `conductor doctor --repo <path> --verify` then runs setup and every
+check in a fresh worktree at `HEAD` without calling a model. The file can be
+committed or kept local (init offers to add `.conductor/` to the clone's
+local exclude file); runs read it from your working copy either way. The
+example below shows every key; generated files use a subset.
+
 ```yaml
 version: 1
 
@@ -155,7 +163,21 @@ templates: .conductor/templates         # optional overrides of implementer.md /
 
 ## Resolution order
 
-Global roles → repo `routing` → task `routing`. Global loop → task `budget`.
+Global roles → repo `routing` → task `routing` → `conductor run` flags. Global loop → task `budget`.
+
+The flags take `<provider>/<model>[:<effort>]`:
+
+```sh
+conductor run task.md --implementer claude/opus:high --reviewer codex/default
+conductor run task.md -i claude/claude-fable-5 -r none      # raw model id; no review round
+```
+
+`<model>` is a label from `providers.<p>.models`, or, if it is not one, passed to
+the CLI verbatim as a model id (with a note), so a new model version needs no
+config edit. Omitting `:<effort>` keeps the configured effort when the provider
+is unchanged and drops it otherwise, since effort values are vendor-specific.
+`--reviewer none` sets `max_reviewers` to 0. The flags are written into the
+stored task's `routing`, so `conductor show --json` records what actually ran.
 Repo verification → task `verification.add` and `verification.disable`.
 Repo policy is not overridable per task; loosening it is a repo decision.
 
