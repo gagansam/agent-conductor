@@ -45,6 +45,7 @@ interface TaskSpec {
   budget: Budget;
   routing: Partial<Record<Role, RoleTarget>>;   // per-task override of config roles
   gates: Gate[];                       // where the run pauses for the operator
+  clarify: boolean;                    // implementer asks its questions before coding (default: loop.clarify)
   reference: string[];                 // free-text pointers (ticket URLs, design docs); not fetched
 }
 
@@ -227,7 +228,9 @@ interface ImplementerReport {
   approach: string;                    // markdown; why this shape
   acceptance: { id: string; status: 'done' | 'partial' | 'not_done' | 'not_applicable'; note?: string }[];
   claims: Claim[];                     // self-reported verification; recorded, never trusted
-  open_questions: string[];            // things the operator should decide
+  open_questions: string[];            // follow-ups for the operator that did not affect this change
+  blocking_questions: Question[];      // set only when it stopped mid-work: a wrong guess would waste the work
+  decisions_made: OwnChoice[];         // judgment calls it made itself; reviewed by the operator before code review
   risks: string[];                     // what the implementer thinks a reviewer should look at
   did_not_do: string[];                // explicit scope it left out and why
 }
@@ -346,6 +349,44 @@ Rules the schema encodes and the confirmer enforces:
   same defect escalates ([05-loop-control.md](05-loop-control.md)).
 
 ---
+
+## 4b. Questions and decisions — before round 1
+
+The implementer's read-only clarify turn returns this as its final message
+(see [05-loop-control.md](05-loop-control.md)):
+
+```ts
+interface QuestionsOutput {
+  schema_version: 1;
+  questions: Question[];               // at most 5 are kept
+  notes: string;
+}
+
+interface Question {
+  id: string;                          // "Q1"
+  question: string;
+  why: string;                         // what changes in the implementation depending on the answer
+  options: string[];
+  default: string;                     // what it will do if nobody answers; must be safe to accept unread
+}
+
+interface OwnChoice {                  // a small decision the implementer made itself
+  id: string;
+  question: string;                    // one short sentence
+  chosen: string;
+  alternatives: string[];
+  why: string;
+}
+
+interface Clarification {              // recorded per question or choice, carried into every later pack as a decision
+  id: string;
+  stage: 'before_coding' | 'blocking' | 'own_choice';
+  question: string;
+  answer: string;
+  source: 'operator' | 'default';      // operator: a person saw it (Enter on the recommendation counts)
+  overruled_from?: string;             // the implementer's choice, when the operator replaced it
+}
+```
 
 ## 5. VerificationResult — the only ground truth
 

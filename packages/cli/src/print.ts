@@ -1,10 +1,19 @@
-import type { ConductorEvent, Finding, RunSummary } from '@agent-conductor/core';
+import type { Clarification, ConductorEvent, Finding, RunSummary } from '@agent-conductor/core';
 
 const tty = process.stdout.isTTY === true && !process.env.NO_COLOR;
 const paint = (code: string) => (s: string): string => (tty ? `\x1b[${code}m${s}\x1b[0m` : s);
 export const c = { dim: paint('2'), bold: paint('1'), red: paint('31'), green: paint('32'), yellow: paint('33'), cyan: paint('36') };
 
 const clock = (): string => new Date().toTimeString().slice(0, 8);
+
+const STAGE: Record<Clarification['stage'], string> = { before_coding: 'before coding', blocking: 'mid-work', own_choice: 'its own choice' };
+
+/** "decided", "assumed", "accepted" or "overruled", then the question and the answer that now binds. */
+export function clarificationLine(q: Clarification): string {
+  const label =
+    q.overruled_from !== undefined ? c.green('overruled') : q.source === 'default' ? c.yellow('assumed  ') : q.stage === 'own_choice' ? c.green('accepted ') : c.green('decided  ');
+  return `${label} ${q.question} ${c.dim('→')} ${q.answer}${q.overruled_from !== undefined ? c.dim(` (was: ${q.overruled_from})`) : ''} ${c.dim(`[${STAGE[q.stage]}]`)}`;
+}
 const line = (s: string): void => void process.stdout.write(`${c.dim(clock())} ${s}\n`);
 const secs = (ms: number): string => `${(ms / 1000).toFixed(1)}s`;
 
@@ -58,6 +67,10 @@ export function consoleObserver(opts: { verbose: boolean }): (e: ConductorEvent)
       case 'finding':
         line(`  ${findingLine(e.finding)}`);
         break;
+      case 'clarified':
+        if (!e.clarifications.length) line(c.dim('  no questions: the task is clear enough to start'));
+        for (const q of e.clarifications) line(`  ${clarificationLine(q)}`);
+        break;
       case 'warning':
         line(c.yellow(`  warning: ${e.message}`));
         break;
@@ -89,6 +102,19 @@ export function printSummary(s: RunSummary): void {
   if (s.needs_human.length) {
     out(`\n  ${s.needs_human.length} finding(s) need your judgment:`);
     for (const f of s.needs_human) out(`    ${findingLine(f)}`);
+  }
+  const assumed = s.clarifications.filter((q) => q.source === 'default');
+  if (assumed.length) {
+    out(`\n  ${assumed.length} assumption(s) nobody confirmed. Check these before you apply:`);
+    for (const q of assumed) out(`    ${clarificationLine(q)}`);
+  }
+  if (s.open_questions.length) {
+    out('\n  The implementer left questions for you:');
+    for (const q of s.open_questions) out(`    ? ${q}`);
+  }
+  if (s.did_not_do.length) {
+    out('\n  Left out on purpose:');
+    for (const d of s.did_not_do) out(`    - ${d}`);
   }
   if (s.open_repro_files.length) out(`\n  failing reproductions kept out of the patch (they are in the worktree): ${s.open_repro_files.join(', ')}`);
   if (s.advice_count) out(`\n  ${s.advice_count} piece(s) of advice recorded, not acted on: conductor show ${s.run_id.slice(-6)} --advice`);

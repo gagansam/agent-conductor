@@ -18,6 +18,37 @@ export interface ExtractPatchSpec {
   touch_hint?: string[];
   /** Extra paths to leave out of the patch (e.g. harvested reproductions that are still open). */
   exclude_paths?: string[];
+  /**
+   * Files setup created or changed (from `worktreeState` right after setup). Left out of the patch while they
+   * are still exactly as setup left them: a lockfile an install wrote is not the worker's change.
+   */
+  setup_state?: Map<string, string | null>;
+}
+
+/**
+ * Every path whose content differs from base_sha right now, with its blob id
+ * (null when deleted). Uses a throwaway index, so the worktree's own index is untouched.
+ */
+export async function worktreeState(worktree_abs: string, base_sha: string, scratch_dir_abs: string): Promise<Map<string, string | null>> {
+  mkdirSync(scratch_dir_abs, { recursive: true });
+  const tmpIndex = join(scratch_dir_abs, `.state-index-${ulid()}`);
+  const env = { GIT_INDEX_FILE: tmpIndex };
+  try {
+    await git(worktree_abs, ['read-tree', base_sha], { env });
+    await git(worktree_abs, ['add', '-A', '--', '.'], { env });
+    const status = (await git(worktree_abs, ['diff', '--cached', '--name-status', '--no-renames', '-z', base_sha], { env })).stdout.split('\0').filter(Boolean);
+    const blobs = new Map<string, string>();
+    for (const rec of (await git(worktree_abs, ['ls-files', '-s', '-z'], { env })).stdout.split('\0').filter(Boolean)) {
+      const tab = rec.indexOf('\t');
+      blobs.set(rec.slice(tab + 1), rec.slice(0, tab).split(' ')[1]!);
+    }
+    const state = new Map<string, string | null>();
+    for (let i = 0; i + 1 < status.length; i += 2) state.set(status[i + 1]!, status[i] === 'D' ? null : (blobs.get(status[i + 1]!) ?? null));
+    return state;
+  } finally {
+    rmSync(tmpIndex, { force: true });
+    rmSync(`${tmpIndex}.lock`, { force: true });
+  }
 }
 
 /**
@@ -31,10 +62,18 @@ export async function extractPatch(spec: ExtractPatchSpec): Promise<PatchInfo> {
   mkdirSync(dirname(spec.patch_path_abs), { recursive: true });
   const tmpIndex = join(dirname(spec.patch_path_abs), `.index-${ulid()}`);
   const env = { GIT_INDEX_FILE: tmpIndex };
-  const excludes = [...EXCLUDES, ...(spec.exclude_paths ?? []).map((p) => `:(exclude,literal)${p}`)];
+  const extra = (spec.exclude_paths ?? []).map((p) => `:(exclude,literal)${p}`);
+  const leftAsSetupMadeThem: string[] = [];
+  if (spec.setup_state?.size) {
+    const now = await worktreeState(spec.worktree_abs, spec.base_sha, dirname(spec.patch_path_abs));
+    for (const [path, blob] of spec.setup_state) if (now.has(path) && now.get(path) === blob) leftAsSetupMadeThem.push(path);
+  }
+  const excludes = [...EXCLUDES, ...extra, ...leftAsSetupMadeThem.map((p) => `:(exclude,literal)${p}`)];
   try {
     await git(spec.worktree_abs, ['read-tree', spec.base_sha], { env });
-    await git(spec.worktree_abs, ['add', '-A', '--', '.', ...excludes], { env });
+    // Not the .conductor excludes here: `git add` refuses a pathspec naming an ignored path, and the operator
+    // may ignore .conductor/ themselves. The directories ignore themselves, so `add -A` never picks them up.
+    await git(spec.worktree_abs, ['add', '-A', '--', '.', ...extra], { env });
     const range = ['--cached', '--no-renames', '--no-color', '--no-ext-diff', spec.base_sha, '--', '.', ...excludes];
     await gitToFile(spec.worktree_abs, ['diff', '--binary', ...range], spec.patch_path_abs, { env });
     const numstat = (await git(spec.worktree_abs, ['diff', '--numstat', '-z', ...range], { env })).stdout;

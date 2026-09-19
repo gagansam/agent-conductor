@@ -8,11 +8,11 @@ Paths are relative to the repository root, which is your current directory.
 
 - `{{pack_dir}}/TASK.md` — the task, its acceptance criteria and constraints
 - `{{pack_dir}}/INSTRUCTIONS.md` — this repository's engineering and review instructions; follow them
-- `{{pack_dir}}/CONTEXT.md` — repository facts and the checks that already pass
+- `{{pack_dir}}/CONTEXT.md` — repository facts, decisions already made, and the checks that already pass
 - `{{pack_dir}}/DIFF.patch` — exactly what the implementer changed
 - `{{pack_dir}}/REPORT.json` — the implementer's own account (claims, not facts)
 {{prior_line}}
-Review the diff in the context of the surrounding code, not in isolation.
+Review the diff in the context of the surrounding code, not in isolation. Decisions listed in CONTEXT.md are binding: a change that contradicts one is a `spec-mismatch` finding. Do not re-open a decision because you would have chosen differently.
 
 ## The contract: findings must be executable
 

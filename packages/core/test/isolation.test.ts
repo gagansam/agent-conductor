@@ -2,7 +2,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { auditWorktree, snapshotGit } from '../src/isolation/audit.js';
-import { applyPatch, checkPatch, extractPatch } from '../src/isolation/diff.js';
+import { applyPatch, checkPatch, extractPatch, worktreeState } from '../src/isolation/diff.js';
 import { harvest, restoreHarvested, unharvest } from '../src/isolation/harvest.js';
 import { createWorktree, ensureHooksDir, listWorktrees, removeWorktree } from '../src/isolation/worktree.js';
 import { makeTempRepo, type TempRepo } from './helpers/repo.js';
@@ -104,6 +104,33 @@ describe('patch', () => {
     expect(info.deletions).toBe(1);
     // The worktree's real index was never touched.
     expect(repo.run(['diff', '--cached', '--name-only'], w).trim()).toBe('');
+  });
+
+  it('works when the operator ignores .conductor/ themselves', async () => {
+    writeFileSync(join(repo.root, '.git', 'info', 'exclude'), '.conductor/\n');
+    const w = await make('impl');
+    repo.write('src/a.ts', 'export const a = 2;\n', w);
+    repo.write('.conductor/out/report.json', '{}', w);
+    const info = await extractPatch({ worktree_abs: w, base_sha: repo.base_sha, patch_path_abs: join(repo.scratch, 'run/ignored.patch') });
+    expect(info.files_changed).toEqual(['src/a.ts']);
+  });
+
+  it('leaves out what setup wrote, unless the worker changes it afterwards', async () => {
+    const w = await make('impl');
+    repo.write('package-lock.json', '{"lockfileVersion": 3}\n', w);
+    repo.write('README.md', '# rewritten by setup\n', w);
+    const setupState = await worktreeState(w, repo.base_sha, join(repo.scratch, 'run'));
+    expect([...setupState.keys()].sort()).toEqual(['README.md', 'package-lock.json']);
+
+    repo.write('src/a.ts', 'export const a = 2;\n', w);
+    const patchPath = join(repo.scratch, 'run/setup.patch');
+    const first = await extractPatch({ worktree_abs: w, base_sha: repo.base_sha, patch_path_abs: patchPath, setup_state: setupState });
+    expect(first.files_changed).toEqual(['src/a.ts']);
+
+    // The worker adds a dependency: now the lockfile is its change too.
+    repo.write('package-lock.json', '{"lockfileVersion": 3, "packages": {}}\n', w);
+    const second = await extractPatch({ worktree_abs: w, base_sha: repo.base_sha, patch_path_abs: patchPath, setup_state: setupState });
+    expect(second.files_changed).toEqual(['package-lock.json', 'src/a.ts']);
   });
 
   it('reports an empty patch', async () => {

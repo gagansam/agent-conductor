@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { QuestionsOutputSchema } from './clarify.js';
 import type { Role } from './task.js';
 import { ReproOutputSchema, VerdictOutputSchema } from './verdict.js';
 import { ImplementerReportSchema } from './work-product.js';
@@ -15,16 +16,24 @@ export const PACK_DIR_REL = '.conductor/pack';
 
 const toJson = (schema: z.ZodType): object => z.toJSONSchema(schema, { io: 'input' }) as object;
 
-const OUTPUTS: Record<Role, { file: string; schema: z.ZodType }> = {
+/** What a worker produces: one per role, plus the implementer's clarify turn. */
+export type OutputKind = Role | 'questions';
+
+const OUTPUTS: Record<OutputKind, { file: string; schema: z.ZodType }> = {
   implementer: { file: 'report.json', schema: ImplementerReportSchema },
   reviewer: { file: 'verdict.json', schema: VerdictOutputSchema },
   reproducer: { file: 'repro.json', schema: ReproOutputSchema },
+  questions: { file: 'questions.json', schema: QuestionsOutputSchema },
 };
 
-/** The file a role must write, and the JSON Schema it must satisfy. */
-export function roleOutput(role: Role): RoleOutput {
-  const o = OUTPUTS[role];
+/** The file a worker must write, and the JSON Schema it must satisfy. */
+export function outputSpec(kind: OutputKind): RoleOutput {
+  const o = OUTPUTS[kind];
   return { path_rel: `${OUT_DIR_REL}/${o.file}`, schema: o.schema, json_schema: toJson(o.schema) };
+}
+
+export function roleOutput(role: Role): RoleOutput {
+  return outputSpec(role);
 }
 
 /** Models write `"line": null` for "unknown". The schemas say optional, so drop nulls before validating. */

@@ -142,6 +142,7 @@ loop:
   max_worker_runs: 8
   max_reviewers: ${rev ? 1 : 0}
   require_cross_vendor_review: warn   # enforce | warn | off
+  clarify: true                       # before coding, the implementer asks its questions (one short read-only turn)
 
 gates:
   default: [after_review, before_apply]

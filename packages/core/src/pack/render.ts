@@ -3,7 +3,7 @@ import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, writeFileSyn
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import picomatch from 'picomatch';
-import { PACK_DIR_REL, roleOutput } from '../contracts/json-schema.js';
+import { outputSpec, PACK_DIR_REL, type OutputKind } from '../contracts/json-schema.js';
 import type { ContextPack, FileExcerpt, PackBase, RoleAddendum } from '../contracts/pack.js';
 import type { FixTarget } from '../contracts/round.js';
 import type { Role, TaskSpec } from '../contracts/task.js';
@@ -88,7 +88,9 @@ function renderContext(base: PackBase): string {
     base.repo.verification_summary,
     '',
   ];
-  if (base.decisions.length) parts.push('## Operator decisions', '', ...base.decisions.map((d) => `- ${d}`), '');
+  if (base.decisions.length) {
+    parts.push('## Decisions already made (binding)', '', 'Follow these. A change that contradicts one is wrong even if every check passes.', '', ...base.decisions.map((d) => `- ${d}`), '');
+  }
   if (base.files.length) {
     parts.push('## Files the operator attached', '');
     for (const f of base.files) parts.push(`### ${f.path}`, '', fence(f.content), '');
@@ -139,6 +141,35 @@ export interface RenderPackSpec {
   /** Reviewer only. */
   diff_path_abs?: string;
   report?: ImplementerReport | null;
+  /** Prompt template name, when not the role's own (e.g. "clarify"). */
+  template?: string;
+  /** Output document, when not the role's own (e.g. "questions"). */
+  output_kind?: OutputKind;
+  /** Implementer only: whether it may stop to ask, and how many stops it has left. */
+  asking?: { attended: boolean; stops_left: number };
+}
+
+/** How the implementer should handle uncertainty: decide small things, stop only when a wrong guess wastes the work. */
+export function askingSection(asking: { attended: boolean; stops_left: number } | undefined): string {
+  const record =
+    'Decide small things yourself: anything cheap to change later, such as wording, a default value, or which of two equivalent helpers to use. Record each such judgment call under `decisions_made` in your report, with the alternatives you rejected. Keep each `question` to one short sentence and put your reasoning under `why`.';
+  if (!asking || !asking.attended) {
+    return `## When you are unsure\n\nNobody can answer questions during this run. ${record} Decide the big ones yourself too, choosing what you would recommend, and record them the same way. Leave \`blocking_questions\` empty.`;
+  }
+  if (asking.stops_left <= 0) {
+    return `## When you are unsure\n\nYou have used every stop allowed in this run, so you cannot ask again. ${record} Decide the big ones yourself too, choosing what you would recommend, and record them the same way. Leave \`blocking_questions\` empty.`;
+  }
+  return [
+    '## When you are unsure',
+    '',
+    `${record} The operator reviews them before the code is reviewed and may overrule some.`,
+    '',
+    'Stop only for a question where a wrong guess would force redoing most of the work: which module, file or layer the change belongs in, the shape of a data model or API, or anything that contradicts the task as written. Then do not guess. Write your report with the question under `blocking_questions`, giving the options and your recommended answer as `default`, and end your turn. Keep the work you have done so far in the tree. You will be resumed in this same session with the answer.',
+    '',
+    'Do not hedge by building more than one alternative so that you do not have to choose, such as adding the same function to two modules. Noticing that you would need to hedge is the signal to stop.',
+    '',
+    `You may stop at most ${asking.stops_left} more time${asking.stops_left === 1 ? '' : 's'} in this run.`,
+  ].join('\n');
 }
 
 export interface RenderedPack {
@@ -148,8 +179,8 @@ export interface RenderedPack {
   pack: ContextPack;
 }
 
-function loadTemplate(role: Role, overrideDir?: string): string {
-  const name = `${role}.md`;
+function loadTemplate(template: string, overrideDir?: string): string {
+  const name = `${template}.md`;
   if (overrideDir && existsSync(join(overrideDir, name))) return readFileSync(join(overrideDir, name), 'utf8');
   return readFileSync(join(BUILTIN_TEMPLATES, name), 'utf8');
 }
@@ -160,7 +191,7 @@ const fill = (template: string, vars: Record<string, string>): string =>
 /** Write the pack into the worktree and return the prompt. Files are the interface (ADR-0006). */
 export function renderPack(spec: RenderPackSpec): RenderedPack {
   const role = spec.addendum.role;
-  const out = roleOutput(role);
+  const out = outputSpec(spec.output_kind ?? role);
   const dir = join(spec.worktree_abs, PACK_DIR_REL);
   resetConductorDirs(spec.worktree_abs, ['pack', 'out']);
 
@@ -179,7 +210,7 @@ export function renderPack(spec: RenderPackSpec): RenderedPack {
 
   const fixTargets = spec.addendum.role === 'implementer' ? spec.addendum.fix_targets : [];
   const reproPaths = spec.addendum.role === 'implementer' ? [] : spec.addendum.repro_allowed_paths;
-  const prompt = fill(loadTemplate(role, spec.templates_dir_abs), {
+  const prompt = fill(loadTemplate(spec.template ?? role, spec.templates_dir_abs), {
     title: spec.base.task.title,
     round: String(spec.round),
     output_path: out.path_rel,
@@ -189,6 +220,7 @@ export function renderPack(spec: RenderPackSpec): RenderedPack {
       ? `The task has already been implemented in this working tree, but these problems remain. Fix exactly these, and nothing else:\n\n${renderFixTargets(fixTargets)}`
       : 'Implement the task described in TASK.md in this working tree.',
     repro_allowed_paths: reproPaths.map((p) => `\`${p}\``).join(', ') || '(none configured)',
+    asking_section: askingSection(spec.asking),
   });
   files['PROMPT.md'] = prompt;
 

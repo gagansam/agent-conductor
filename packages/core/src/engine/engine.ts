@@ -5,6 +5,7 @@ import type { WorkerAdapter } from '@agent-conductor/adapter-api';
 import { loadRepoConfig, resolveRoles, type Paths, type ResolvedTarget } from '../config/load.js';
 import { buildPolicy } from '../config/policy.js';
 import type { GlobalConfig, RepoConfig } from '../config/schema.js';
+import { MAX_QUESTIONS, type Clarification, type ClarificationStage, type OwnChoice, type Question, type QuestionsOutput } from '../contracts/clarify.js';
 import type { PackBase, PriorRound } from '../contracts/pack.js';
 import type { Debt, EscalationReason, FixTarget, LoopDecision, RunOutcome, RunStatus } from '../contracts/round.js';
 import type { Gate, Role, TaskSpec } from '../contracts/task.js';
@@ -19,11 +20,11 @@ import { currentBranch, revParse } from '../git/exec.js';
 import { ulid } from '../ids.js';
 import { loadInstructions } from '../instructions/load.js';
 import { auditWorktree, snapshotGit } from '../isolation/audit.js';
-import { applyPatch, extractPatch } from '../isolation/diff.js';
+import { applyPatch, extractPatch, worktreeState } from '../isolation/diff.js';
 import { restoreHarvested } from '../isolation/harvest.js';
 import { setupWorktree } from '../isolation/setup.js';
 import { createWorktree, ensureHooksDir, removeWorktree } from '../isolation/worktree.js';
-import { loadExcerpts, packId, renderPack } from '../pack/render.js';
+import { askingSection, loadExcerpts, packId, renderPack } from '../pack/render.js';
 import type { Store } from '../store/store.js';
 import { buildPlan, describePlan, runVerification, summarize, type PlannedStep } from '../verifier/verifier.js';
 import { readRoleOutput, repairPrompt } from './output.js';
@@ -36,6 +37,21 @@ export interface GateRequest {
 }
 export type GateAnswer = 'continue' | 'abort';
 export type GateHandler = (req: GateRequest) => Promise<GateAnswer>;
+export interface QuestionsRequest {
+  stage: 'before_coding' | 'blocking';
+  questions: Question[];
+  /** Aborted when the answer timeout expires; the handler should stop waiting. */
+  signal: AbortSignal;
+}
+/** Shows the implementer's questions. Returns question id → answer; a missing id means "use its recommendation". */
+export type QuestionsHandler = (req: QuestionsRequest) => Promise<Record<string, string>>;
+
+export interface ChoicesRequest {
+  choices: OwnChoice[];
+  signal: AbortSignal;
+}
+/** Shows the implementer's own judgment calls. Returns choice id → the operator's answer, for overruled ones only. */
+export type ChoicesHandler = (req: ChoicesRequest) => Promise<Record<string, string>>;
 
 export interface EngineOptions {
   store: Store;
@@ -49,6 +65,13 @@ export interface EngineOptions {
   signal?: AbortSignal;
   /** Skip the baseline check for this run (overrides loop.verify_baseline). */
   skip_baseline?: boolean;
+  /**
+   * Absent ⇒ nobody is there: the implementer is told to decide everything itself, its questions get its own
+   * recommendations, and everything assumed is listed in the summary.
+   */
+  questions?: QuestionsHandler;
+  /** Absent ⇒ the implementer's own choices are recorded as unconfirmed, not reviewed. */
+  choices?: ChoicesHandler;
 }
 
 export interface RunSummary {
@@ -69,6 +92,11 @@ export interface RunSummary {
   advice_count: number;
   /** Reproduction files of still-open findings: in the worktree, left out of the patch. */
   open_repro_files: string[];
+  /** Questions asked before coding, and how each was answered. */
+  clarifications: Clarification[];
+  /** From the implementer's last report: what it wants the operator to decide, and what it deliberately left out. */
+  open_questions: string[];
+  did_not_do: string[];
 }
 
 type Stop =
@@ -117,6 +145,14 @@ class Run {
   private implSession: string | undefined;
   private lastPatch: PatchInfo | undefined;
   private lastReport: ImplementerReport | null = null;
+  private clarifications: Clarification[] = [];
+  private questionStops = 0;
+  /** Own choices from every implementer report since the last checkpoint, by question. */
+  private pendingChoices = new Map<string, OwnChoice>();
+  /** Per round, so a correction after an overrule gets its own attempt number and log folder. */
+  private nextAttempt = 0;
+  /** What setup changed in the implementer's worktree; kept out of every patch while unchanged. */
+  private setupState = new Map<string, string | null>();
 
   constructor(
     private readonly task: TaskSpec,
@@ -215,6 +251,11 @@ class Run {
     await createWorktree({ repo_abs: repo, path_abs: this.impl, base_sha: this.base_sha, hooks_dir: this.o.paths.hooks });
     const setup = await setupWorktree({ repo_abs: repo, worktree_abs: this.impl, setup: this.repoCfg.setup, log_dir_abs: join(this.run_dir, 'setup'), signal: this.ac.signal });
     if (!setup.ok) return { outcome: 'aborted', reason: 'unrecoverable', detail: `worktree setup failed: ${setup.detail} (logs in ${join(this.run_dir, 'setup')})` };
+    this.setupState = await worktreeState(this.impl, this.base_sha, join(this.run_dir, 'setup'));
+    if (this.setupState.size) {
+      const names = [...this.setupState.keys()];
+      this.observer({ type: 'warning', message: `setup changed ${names.length} file(s) (${names.slice(0, 5).join(', ')}${names.length > 5 ? ', …' : ''}); they stay out of the patch unless the implementer changes them` });
+    }
 
     const baseline = await this.verifyBaseline();
     if (baseline) return baseline;
@@ -229,13 +270,27 @@ class Run {
       files: await loadExcerpts(this.impl, this.task.context_files),
     };
 
+    if (this.task.clarify) {
+      const stopped = await this.clarifyStep();
+      if (stopped) return stopped;
+    }
+
     let fixTargets: FixTarget[] = [];
     let prevDebt: number | undefined;
 
     for (this.round = 1; this.round <= this.task.budget.max_rounds; this.round++) {
       this.o.store.insertRound(this.run_id, this.round);
-      const implemented = await this.implementUntilGreen(fixTargets);
+      this.nextAttempt = 0;
+      let implemented = await this.implementUntilGreen(fixTargets);
       if ('stop' in implemented) return this.endRound(implemented.stop, implemented.debt);
+
+      // The implementer's own judgment calls, shown before anyone reviews the code. Overrules go back to it as fixes.
+      const overrules = await this.reviewChoices(true);
+      if (overrules.length) {
+        implemented = await this.implementUntilGreen(overrules);
+        if ('stop' in implemented) return this.endRound(implemented.stop, implemented.debt);
+        await this.reviewChoices(false);
+      }
 
       if (this.task.gates.includes('after_implement')) {
         const a = await this.askGate('after_implement', `Round ${this.round}: verification is green. ${this.describePatch(implemented.patch)}`, []);
@@ -378,9 +433,13 @@ class Run {
   private async implementUntilGreen(initialTargets: FixTarget[]): Promise<{ patch: PatchInfo; verification: VerificationResult } | { stop: Stop; debt: Debt }> {
     let fixTargets = initialTargets;
     const maxFix = this.task.budget.max_fix_attempts_per_round;
+    const first = this.nextAttempt;
 
-    for (let attempt = 0; ; attempt++) {
-      this.observer({ type: 'phase', round: this.round, phase: 'implement', detail: attempt === 0 ? (fixTargets.length ? `fixing ${fixTargets.length} confirmed finding(s)` : 'first pass') : `fix attempt ${attempt} of ${maxFix}` });
+    for (let attempt = first; ; attempt++) {
+      this.nextAttempt = attempt + 1;
+      const fixes = attempt - first;
+      const opening = fixTargets.every((t) => t.ref.startsWith('choice:')) && fixTargets.length ? `applying ${fixTargets.length} overruled choice(s)` : fixTargets.length ? `fixing ${fixTargets.length} confirmed finding(s)` : 'first pass';
+      this.observer({ type: 'phase', round: this.round, phase: 'implement', detail: fixes === 0 ? opening : `fix attempt ${fixes} of ${maxFix}` });
       const { base, pack_id } = this.packBase();
       const rendered = renderPack({
         base,
@@ -390,12 +449,13 @@ class Run {
         addendum: { role: 'implementer', fix_targets: fixTargets },
         worktree_abs: this.impl,
         keep_dir_abs: this.roundDir(`implement-${attempt}`, 'pack'),
+        asking: this.askingFor(),
         ...(this.templatesDir() ? { templates_dir_abs: this.templatesDir()! } : {}),
       });
       this.o.store.updateRun(this.run_id, { pack_id });
 
       const before = await snapshotGit(this.impl);
-      const worked = await this.runRole<ImplementerReport>({
+      let worked = await this.runRole<ImplementerReport>({
         run_id: this.run_id,
         round: this.round,
         role: 'implementer',
@@ -417,6 +477,21 @@ class Run {
         return { stop: { outcome: 'escalated', reason: c === 'rate_limited' ? 'quota_exhausted' : 'worker_failed', detail: `implementer ${c}: ${worked.last.result.detail ?? 'no detail'} (logs: ${worked.last.log_dir_abs})` }, debt: unknownDebt() };
       }
       this.implSession = worked.last.result.session_ref ?? this.implSession;
+      this.collectChoices(worked.output);
+
+      // Blocking questions: the implementer stopped because a wrong guess would waste the work. Answer, resume, repeat.
+      for (let n = 1; worked.output?.blocking_questions.length; n++) {
+        const resumed = await this.answerBlocking(worked.output.blocking_questions, attempt, n, fixTargets);
+        if (!resumed) break;
+        worked = resumed;
+        if (this.ac.signal.aborted) throw new DispatchPaused('');
+        const rc = worked.last.result.classification;
+        if (rc !== 'ok') {
+          return { stop: { outcome: 'escalated', reason: rc === 'rate_limited' ? 'quota_exhausted' : 'worker_failed', detail: `implementer ${rc} after answering its questions: ${worked.last.result.detail ?? 'no detail'} (logs: ${worked.last.log_dir_abs})` }, debt: unknownDebt() };
+        }
+        this.implSession = worked.last.result.session_ref ?? this.implSession;
+        this.collectChoices(worked.output);
+      }
       this.lastReport = worked.output ?? null;
       if (!worked.output) this.observer({ type: 'warning', message: `implementer produced no valid report (${(worked.errors ?? []).slice(0, 3).join('; ')}); continuing with the patch alone` });
 
@@ -426,7 +501,7 @@ class Run {
         if (tampered.length) this.observer({ type: 'warning', message: `implementer modified reproduction file(s) ${tampered.join(', ')}; restored the originals` });
       }
 
-      const patch = await extractPatch({ worktree_abs: this.impl, base_sha: this.base_sha, patch_path_abs: this.roundDir(`implement-${attempt}.patch`), touch_hint: this.task.touch_hint });
+      const patch = await extractPatch({ worktree_abs: this.impl, base_sha: this.base_sha, patch_path_abs: this.roundDir(`implement-${attempt}.patch`), touch_hint: this.task.touch_hint, setup_state: this.setupState });
       const audit = await auditWorktree(this.impl, this.base_sha, before);
       const fatal = audit.filter((v) => v.severity === 'fatal');
       this.o.store.annotateWorkerRun(worked.last.worker_run_id, { patch, audit, ...(fatal.length ? { classification: 'git_mutated', detail: fatal.map((v) => v.detail).join('; ') } : {}) });
@@ -443,7 +518,7 @@ class Run {
       const claimsDone = !!worked.output && worked.output.acceptance.length > 0 && worked.output.acceptance.every((a) => a.status === 'done' || a.status === 'not_applicable');
       if ((patch.empty && !claimsDone) || (unchanged && fixTargets.length > 0)) {
         const why = patch.empty ? 'the implementer changed no files' : 'the patch is identical to the previous attempt';
-        if (attempt >= maxFix) return { stop: { outcome: 'escalated', reason: 'empty_diff', detail: why }, debt: unknownDebt() };
+        if (fixes >= maxFix) return { stop: { outcome: 'escalated', reason: 'empty_diff', detail: why }, debt: unknownDebt() };
         this.observer({ type: 'warning', message: `${why}; asking once more` });
         fixTargets = [...fixTargets.filter((t) => t.ref !== 'empty_diff'), { kind: 'operator', ref: 'empty_diff', summary: 'Your last turn left the working tree unchanged', detail: `${why}. The task is not done. Make the change in the working tree, then write your report.` }];
         this.lastPatch = patch;
@@ -472,8 +547,8 @@ class Run {
 
       const summary = summarize(verification);
       const debt: Debt = { failing_required_steps: summary.failed_steps.length, confirmed_open_findings: this.openFindings.length, total: summary.failed_steps.length + this.openFindings.length };
-      if (attempt >= maxFix) {
-        return { stop: { outcome: 'escalated', reason: 'verification_stuck', detail: `verification still red after ${attempt} fix attempt(s): ${summary.failed_steps.map((s) => s.step_id).join(', ')}` }, debt };
+      if (fixes >= maxFix) {
+        return { stop: { outcome: 'escalated', reason: 'verification_stuck', detail: `verification still red after ${fixes} fix attempt(s): ${summary.failed_steps.map((s) => s.step_id).join(', ')}` }, debt };
       }
       fixTargets = summary.failed_steps.map((s) => ({
         kind: 'verification_failure' as const,
@@ -491,6 +566,232 @@ class Run {
     }
   }
 
+  /**
+   * One read-only turn in the implementer's own session: what would it ask
+   * before writing code? Answers become binding decisions in every later pack,
+   * so the reviewer checks the work against the operator's answer rather than
+   * the implementer's guess. The implementer then resumes the same session.
+   * A failed clarify turn never fails the run; the implementer just starts fresh.
+   */
+  private async clarifyStep(): Promise<Stop | undefined> {
+    this.observer({ type: 'phase', round: 0, phase: 'clarify', detail: 'the implementer lists what it would ask you before it writes code' });
+    const dir = join(this.run_dir, 'clarify');
+    const { base, pack_id } = this.packBase();
+    const rendered = renderPack({
+      base,
+      pack_id,
+      run_id: this.run_id,
+      round: 0,
+      addendum: { role: 'implementer', fix_targets: [] },
+      worktree_abs: this.impl,
+      keep_dir_abs: join(dir, 'pack'),
+      template: 'clarify',
+      output_kind: 'questions',
+      ...(this.templatesDir() ? { templates_dir_abs: this.templatesDir()! } : {}),
+    });
+    const before = await snapshotGit(this.impl);
+    const worked = await this.runRole<QuestionsOutput>({
+      run_id: this.run_id,
+      round: 0,
+      role: 'implementer',
+      output_kind: 'questions',
+      attempt: 0,
+      purpose: 'clarify',
+      target: this.implementer,
+      cwd_abs: this.impl,
+      prompt: rendered.prompt,
+      prompt_sha256: rendered.prompt_sha256,
+      prompt_path_abs: rendered.prompt_path_abs,
+      pack_id,
+      policy: { ...buildPolicy(this.repoCfg), fs: 'read-only' },
+      log_root_abs: dir,
+    });
+    if (this.ac.signal.aborted) throw new DispatchPaused('');
+
+    const fatal = (await auditWorktree(this.impl, this.base_sha, before)).filter((v) => v.severity === 'fatal');
+    if (fatal.length) {
+      this.o.store.annotateWorkerRun(worked.last.worker_run_id, { classification: 'git_mutated', detail: fatal.map((v) => v.detail).join('; ') });
+      return { outcome: 'escalated', reason: 'git_mutated', detail: `the implementer changed git state during its read-only clarify turn: ${fatal.map((v) => v.detail).join('; ')}` };
+    }
+    const c = worked.last.result.classification;
+    if (c !== 'ok' || !worked.output) {
+      this.observer({ type: 'warning', message: `clarify turn ${c !== 'ok' ? c : `gave no valid questions (${(worked.errors ?? []).slice(0, 2).join('; ')})`}; continuing without it` });
+      return undefined;
+    }
+    this.implSession = worked.last.result.session_ref ?? this.implSession;
+
+    let questions = worked.output.questions;
+    if (questions.length > MAX_QUESTIONS) {
+      this.observer({ type: 'warning', message: `the implementer asked ${questions.length} questions; keeping the first ${MAX_QUESTIONS}. A long list usually means the task needs rewriting.` });
+      questions = questions.slice(0, MAX_QUESTIONS);
+    }
+    if (!questions.length) {
+      this.observer({ type: 'clarified', clarifications: [] });
+      return undefined;
+    }
+
+    await this.askQuestions('before_coding', questions);
+    return undefined;
+  }
+
+  // ---- asking the operator ------------------------------------------------------
+
+  private askingFor(): { attended: boolean; stops_left: number } {
+    return { attended: !!this.o.questions, stops_left: Math.max(0, this.o.global.loop.max_question_stops - this.questionStops) };
+  }
+
+  /**
+   * Wait for the operator, but never forever: after answer_timeout_ms the
+   * implementer's recommendation stands, so a run left alone still finishes.
+   */
+  private async waitForOperator<T>(ask: (signal: AbortSignal) => Promise<T>, fallback: T): Promise<{ value: T; answered: boolean }> {
+    const timeout = new AbortController();
+    const timer = setTimeout(() => timeout.abort(), this.o.global.loop.answer_timeout_ms);
+    const onAbort = (): void => timeout.abort();
+    this.ac.signal.addEventListener('abort', onAbort, { once: true });
+    const expired = new Promise<typeof EXPIRED>((resolve) => timeout.signal.addEventListener('abort', () => resolve(EXPIRED), { once: true }));
+    this.o.store.updateRun(this.run_id, { status: 'gated' });
+    try {
+      const result = await Promise.race([ask(timeout.signal), expired]);
+      if (this.ac.signal.aborted) throw new DispatchPaused('');
+      if (result === EXPIRED) {
+        this.observer({ type: 'warning', message: `no answer within ${Math.round(this.o.global.loop.answer_timeout_ms / 60_000)} min; going with the implementer's recommendation` });
+        return { value: fallback, answered: false };
+      }
+      return { value: result, answered: true };
+    } finally {
+      clearTimeout(timer);
+      this.ac.signal.removeEventListener('abort', onAbort);
+      this.o.store.updateRun(this.run_id, { status: 'running' });
+    }
+  }
+
+  /** Ask (or, with nobody there, take the recommendations), then record every answer as a binding decision. */
+  private async askQuestions(stage: 'before_coding' | 'blocking', asked: Question[], opts: { operator: boolean } = { operator: true }): Promise<Clarification[]> {
+    let questions = asked;
+    if (questions.length > MAX_QUESTIONS) {
+      this.observer({ type: 'warning', message: `the implementer asked ${questions.length} questions; keeping the first ${MAX_QUESTIONS}. A long list usually means the task needs rewriting.` });
+      questions = questions.slice(0, MAX_QUESTIONS);
+    }
+    const handler = opts.operator ? this.o.questions : undefined;
+    const res = handler ? await this.waitForOperator((signal) => handler({ stage, questions, signal }), {} as Record<string, string>) : { value: {}, answered: false };
+    const source: Clarification['source'] = res.answered ? 'operator' : 'default';
+    const added = questions.map((q) => ({ id: q.id, stage, question: q.question, answer: res.value[q.id]?.trim() || q.default, source }));
+    this.record(added, stage === 'before_coding' ? 'clarify' : 'blocking', source === 'operator' ? 'answered' : 'defaults', { questions });
+    return added;
+  }
+
+  private record(added: Clarification[], gate: string, action: string, payload: object): void {
+    for (const cl of added) this.decisions.push(decisionText(cl));
+    this.clarifications.push(...added);
+    this.o.store.insertGateDecision(this.run_id, this.round, gate, action, { ...payload, clarifications: added });
+    writeFileSync(join(this.run_dir, 'clarifications.json'), JSON.stringify(this.clarifications, null, 2));
+    this.observer({ type: 'clarified', clarifications: added });
+  }
+
+  /** The implementer stopped mid-work. Answer its questions and resume the same session where it stopped. */
+  private async answerBlocking(questions: Question[], attempt: number, n: number, fixTargets: FixTarget[]): Promise<{ last: DispatchOutcome; output?: ImplementerReport; errors?: string[] } | undefined> {
+    this.questionStops++;
+    const allowed = this.o.global.loop.max_question_stops;
+    if (this.questionStops > allowed + 1) {
+      this.observer({ type: 'warning', message: `the implementer keeps stopping after being told it cannot; continuing with what is in the tree` });
+      return undefined;
+    }
+    // Past its allowance it was told it cannot stop; do not interrupt the operator for it, take its recommendations.
+    const withinAllowance = this.questionStops <= allowed;
+    this.observer({
+      type: 'phase',
+      round: this.round,
+      phase: 'implement',
+      detail: withinAllowance ? `the implementer stopped to ask ${questions.length} question(s) (stop ${this.questionStops} of ${allowed})` : 'the implementer stopped again after its last allowed stop; taking its recommendations',
+    });
+    const answered = await this.askQuestions('blocking', questions, { operator: withinAllowance });
+    if (this.ac.signal.aborted) throw new DispatchPaused('');
+    if (!this.dispatcher.canSpawn()) throw new BudgetExceeded(this.task.budget.max_worker_runs);
+
+    const { base, pack_id } = this.packBase();
+    const rendered = renderPack({
+      base,
+      pack_id,
+      run_id: this.run_id,
+      round: this.round,
+      addendum: { role: 'implementer', fix_targets: fixTargets },
+      worktree_abs: this.impl,
+      keep_dir_abs: this.roundDir(`implement-${attempt}`, `pack-answer-${n}`),
+      asking: this.askingFor(),
+      ...(this.templatesDir() ? { templates_dir_abs: this.templatesDir()! } : {}),
+    });
+    const resumable = !!this.implSession && this.providers.get(this.implementer.provider)!.caps.resume;
+    const list = answered.map((a) => `- ${a.question} → ${a.answer}`).join('\n');
+    const prompt = resumable
+      ? [
+          'Your questions have been answered. These are now binding decisions, also listed in `.conductor/pack/CONTEXT.md`:',
+          '',
+          list,
+          '',
+          'Continue the task from where you stopped; your earlier work is still in the tree.',
+          '',
+          askingSection(this.askingFor()),
+          '',
+          'When you are done, write `.conductor/out/report.json` again, as described in your original instructions.',
+        ].join('\n')
+      : `You already started this task in this working tree and stopped to ask questions. The answers are binding decisions, listed in CONTEXT.md:\n\n${list}\n\nContinue from the current state of the tree.\n\n---\n\n${rendered.prompt}`;
+    const promptPath = join(this.roundDir(`implement-${attempt}`), `ANSWER-PROMPT-${n}.md`);
+    writeFileSync(promptPath, prompt);
+    return this.runRole<ImplementerReport>({
+      run_id: this.run_id,
+      round: this.round,
+      role: 'implementer',
+      attempt,
+      purpose: 'answer',
+      target: this.implementer,
+      cwd_abs: this.impl,
+      prompt,
+      prompt_sha256: sha256(prompt),
+      prompt_path_abs: promptPath,
+      pack_id,
+      policy: buildPolicy(this.repoCfg),
+      log_root_abs: this.roundDir(`implement-${attempt}`),
+      ...(resumable ? { resume_session: this.implSession! } : {}),
+    });
+  }
+
+  /**
+   * The implementer's own judgment calls since the last checkpoint. With an
+   * operator (and `interactive`), they are shown in one batch before review and
+   * overrules come back as fixes; otherwise they are recorded as unconfirmed.
+   */
+  private collectChoices(report: ImplementerReport | undefined): void {
+    const reviewed = new Set(this.clarifications.map((c) => c.question.trim().toLowerCase()));
+    for (const d of report?.decisions_made ?? []) {
+      const key = d.question.trim().toLowerCase();
+      if (!reviewed.has(key)) this.pendingChoices.set(key, d);
+    }
+  }
+
+  private async reviewChoices(interactive: boolean): Promise<FixTarget[]> {
+    const choices = [...this.pendingChoices.values()];
+    this.pendingChoices.clear();
+    if (!choices.length) return [];
+
+    const handler = interactive ? this.o.choices : undefined;
+    const res = handler ? await this.waitForOperator((signal) => handler({ choices, signal }), {} as Record<string, string>) : { value: {}, answered: false };
+    const targets: FixTarget[] = [];
+    const added: Clarification[] = choices.map((d) => {
+      const answer = res.value[d.id]?.trim();
+      if (!answer || answer === d.chosen) return { id: d.id, stage: 'own_choice' as ClarificationStage, question: d.question, answer: d.chosen, source: res.answered ? 'operator' : 'default' };
+      targets.push({
+        kind: 'operator',
+        ref: `choice:${d.id}`,
+        summary: `The operator overruled your choice: ${d.question}`,
+        detail: `You chose: ${d.chosen}\nThe operator decided: ${answer}\nChange the code to follow the operator's decision. It is binding.`,
+      });
+      return { id: d.id, stage: 'own_choice' as ClarificationStage, question: d.question, answer, source: 'operator', overruled_from: d.chosen };
+    });
+    this.record(added, 'choices', targets.length ? 'overruled' : res.answered ? 'accepted' : 'unreviewed', { choices });
+    return targets;
+  }
+
   private templatesDir(): string | undefined {
     return this.repoCfg.templates ? join(this.task.repo.path_abs, this.repoCfg.templates) : undefined;
   }
@@ -499,14 +800,19 @@ class Run {
   private async runRole<T>(req: DispatchRequest): Promise<{ last: DispatchOutcome; output?: T; errors?: string[] }> {
     const first = await this.dispatcher.dispatch(req);
     if (first.result.classification !== 'ok') return { last: first };
-    const parsed = readRoleOutput<T>(req.cwd_abs, req.role, first.result.final_text);
+    const kind = req.output_kind ?? req.role;
+    const parsed = readRoleOutput<T>(req.cwd_abs, kind, first.result.final_text);
     this.o.store.annotateWorkerRun(first.worker_run_id, { output_valid: parsed.ok });
-    if (parsed.ok) return { last: first, output: parsed.value };
+    if (parsed.ok) {
+      // Keep every worker's document with its logs: the worktree's copy is overwritten by the next step.
+      writeFileSync(join(first.log_dir_abs, 'output.json'), JSON.stringify(parsed.value, null, 2));
+      return { last: first, output: parsed.value };
+    }
     if (!this.dispatcher.canSpawn() || this.ac.signal.aborted) return { last: first, errors: parsed.errors };
 
     this.observer({ type: 'warning', message: `${req.role} output invalid (${parsed.errors.slice(0, 2).join('; ')}); running one repair turn` });
     const resumable = !!first.result.session_ref && first.provider.caps.resume;
-    const prompt = repairPrompt(req.role, parsed.errors, parsed.raw, resumable ? undefined : req.prompt);
+    const prompt = repairPrompt(kind, parsed.errors, parsed.raw, resumable ? undefined : req.prompt);
     const promptPath = join(first.log_dir_abs, 'REPAIR-PROMPT.md');
     writeFileSync(promptPath, prompt);
     const { resume_session: _previous, ...rest } = req;
@@ -519,8 +825,9 @@ class Run {
       ...(resumable ? { resume_session: first.result.session_ref! } : {}),
     });
     if (second.result.classification !== 'ok') return { last: first, errors: parsed.errors };
-    const reparsed = readRoleOutput<T>(req.cwd_abs, req.role, second.result.final_text);
+    const reparsed = readRoleOutput<T>(req.cwd_abs, kind, second.result.final_text);
     this.o.store.annotateWorkerRun(second.worker_run_id, { output_valid: reparsed.ok });
+    if (reparsed.ok) writeFileSync(join(second.log_dir_abs, 'output.json'), JSON.stringify(reparsed.value, null, 2));
     const last: DispatchOutcome = { ...second, result: { ...second.result, session_ref: second.result.session_ref ?? first.result.session_ref } };
     return reparsed.ok ? { last, output: reparsed.value } : { last, errors: reparsed.errors };
   }
@@ -644,7 +951,7 @@ class Run {
     let patch: PatchInfo | undefined;
     try {
       // Reproductions of still-open findings fail by definition; they stay out of the deliverable.
-      patch = await extractPatch({ worktree_abs: this.impl, base_sha: this.base_sha, patch_path_abs: join(this.run_dir, 'result.patch'), touch_hint: this.task.touch_hint, exclude_paths: openRepro });
+      patch = await extractPatch({ worktree_abs: this.impl, base_sha: this.base_sha, patch_path_abs: join(this.run_dir, 'result.patch'), touch_hint: this.task.touch_hint, exclude_paths: openRepro, setup_state: this.setupState });
     } catch {
       /* the worktree may not exist if setup never got that far */
     }
@@ -678,11 +985,25 @@ class Run {
       needs_human: this.needsHuman,
       advice_count: this.adviceCount,
       open_repro_files: openRepro,
+      clarifications: this.clarifications,
+      open_questions: this.lastReport?.open_questions ?? [],
+      did_not_do: this.lastReport?.did_not_do ?? [],
     };
     writeFileSync(join(this.run_dir, 'summary.json'), JSON.stringify(summary, null, 2));
     this.observer({ type: 'run_finished', run_id: this.run_id, outcome, detail: stop.detail, ...(patch ? { patch_path: patch.path_abs } : {}), worktree: this.impl });
     return summary;
   }
+}
+
+const EXPIRED = Symbol('expired');
+
+/** How an answer reads in every later pack. Unconfirmed ones say so, so the reviewer knows it may challenge them. */
+function decisionText(c: Clarification): string {
+  if (c.overruled_from !== undefined) return `${c.question} → ${c.answer} (the operator decided, replacing the implementer's choice "${c.overruled_from}")`;
+  if (c.source === 'default') {
+    return `${c.question} → ${c.answer} (${c.stage === 'own_choice' ? "the implementer's own choice" : "the implementer's own recommendation"}; nobody confirmed it)`;
+  }
+  return `${c.question} → ${c.answer} (${c.stage === 'own_choice' ? "the implementer's choice, accepted by the operator" : 'the operator decided'})`;
 }
 
 const zeroDebt = (): Debt => ({ failing_required_steps: 0, confirmed_open_findings: 0, total: 0 });

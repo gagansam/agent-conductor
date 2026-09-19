@@ -55,6 +55,9 @@ loop:
   max_quota_wait_ms: 900000             # wait up to 15 min for a cooling provider before pausing
   require_cross_vendor_review: warn     # enforce | warn | off
   verify_baseline: true                 # run the repo's checks on the untouched base commit first; abort if red
+  clarify: true                         # before coding, the implementer asks its questions (read-only turn); task `clarify: false` or --no-clarify skips
+  max_question_stops: 3                 # times per run the implementer may stop mid-work for a blocking question
+  answer_timeout_ms: 900000             # unanswered questions and choices take the implementer's recommendation after 15 min
 
 gates:
   default: [before_apply]               # after_reproduce | after_implement | after_review | before_apply

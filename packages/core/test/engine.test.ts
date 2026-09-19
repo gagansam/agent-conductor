@@ -67,6 +67,8 @@ beforeEach(() => {
     version: 1,
     providers: { alpha: { adapter: 'fake', models: { strong: 'alpha-1' } }, beta: { adapter: 'fake', models: { strong: 'beta-1' } } },
     roles: { implementer: { provider: 'alpha', model: 'strong' }, reviewer: { provider: 'beta', model: 'strong' } },
+    // The loop tests below script the implementer's work turns; the clarify turn has its own tests.
+    loop: { clarify: false },
   });
 });
 afterEach(() => {
@@ -354,7 +356,7 @@ describe('engine', () => {
   });
 
   it('skips a same-provider reviewer under enforce, and converges without review', async () => {
-    global = GlobalConfigSchema.parse({ ...global, roles: { ...global.roles, reviewer: { provider: 'alpha', model: 'strong' } }, loop: { require_cross_vendor_review: 'enforce' } });
+    global = GlobalConfigSchema.parse({ ...global, roles: { ...global.roles, reviewer: { provider: 'alpha', model: 'strong' } }, loop: { require_cross_vendor_review: 'enforce', clarify: false } });
     const { summary, fake } = await run({ implementer: [{ writes: { 'src/a.ts': 'export const a = 2;\n' }, output: REPORT }] });
     expect(summary.outcome).toBe('converged');
     expect(fake.jobs).toHaveLength(1);
@@ -382,6 +384,16 @@ describe('engine', () => {
     const steps = store.verificationSteps(summary.run_id);
     expect(steps.filter((s) => s.round === 0).map((s) => s.step_id)).toEqual(['value']);
     expect(steps.filter((s) => s.round === 1).map((s) => s.step_id)).toEqual(['value', 'acceptance:AC1']);
+  });
+
+  it('keeps files written by setup out of the patch', async () => {
+    repo.write('.conductor/config.yaml', REPO_CONFIG.replace('version: 1\n', 'version: 1\nsetup:\n  run: echo generated > setup-artifact.txt\n'));
+    repo.run(['add', '-A']);
+    repo.run(['commit', '-q', '-m', 'setup that writes a file']);
+    const { summary } = await run({ implementer: [{ writes: { 'src/a.ts': 'export const a = 2;\n' }, output: REPORT }], reviewer: [{ output: APPROVE }] });
+    expect(summary.outcome).toBe('converged');
+    expect(summary.patch?.files_changed).toEqual(['src/a.ts']);
+    expect(warnings().some((w) => w.includes('setup changed 1 file(s) (setup-artifact.txt)'))).toBe(true);
   });
 
   it('warns when the patch deletes files', async () => {
@@ -414,3 +426,227 @@ describe('engine', () => {
     expect(store.workerRuns(summary.run_id)).toEqual([]);
   });
 });
+
+describe('clarify', () => {
+  const QUESTION = { id: 'Q1', question: 'Should b be exported as well?', why: 'Changes the public API.', options: ['yes', 'no'], default: 'no' };
+  const asks = (...questions: unknown[]) => ({ schema_version: 1, questions });
+  const withClarify = (): void => {
+    global = GlobalConfigSchema.parse({ ...global, loop: { ...global.loop, clarify: true } });
+  };
+  const readPack = (s: RunSummary, rel: string): string => readFileSync(join(s.run_dir, rel), 'utf8');
+
+  it('asks before coding in a read-only turn, then resumes the same session with binding decisions', async () => {
+    withClarify();
+    const seen: string[] = [];
+    const { summary, fake } = await run(
+      {
+        implementer: [{ output: asks(QUESTION) }, { writes: { 'src/a.ts': 'export const a = 2;\n' }, output: REPORT }],
+        reviewer: [{ output: APPROVE }],
+      },
+      { engine: { questions: async ({ questions }) => (seen.push(...questions.map((q) => q.id)), { Q1: 'yes' }) } },
+    );
+    expect(summary.outcome).toBe('converged');
+    expect(seen).toEqual(['Q1']);
+
+    const [clarify, work] = fake.jobs;
+    expect(clarify!.role).toBe('implementer');
+    expect(clarify!.policy.fs).toBe('read-only');
+    expect(clarify!.output.files[0]!.path_rel).toBe('.conductor/out/questions.json');
+    expect(clarify!.prompt).toContain('Before you write any code');
+    expect(work!.policy.fs).toBe('workspace-write');
+    expect(work!.resume?.session_ref).toBe('fake-session-1');
+
+    expect(summary.clarifications).toEqual([{ id: 'Q1', stage: 'before_coding', question: QUESTION.question, answer: 'yes', source: 'operator' }]);
+    const decision = 'Should b be exported as well? → yes (the operator decided)';
+    expect(readPack(summary, 'rounds/1/implement-0/pack/CONTEXT.md')).toContain(decision);
+    expect(readPack(summary, 'rounds/1/review-1/pack/CONTEXT.md')).toContain(decision);
+    expect(store.workerRuns(summary.run_id).map((w) => [w.round, w.purpose])).toEqual([[0, 'clarify'], [1, 'work'], [1, 'work']]);
+  });
+
+  it("without a terminal, takes the implementer's defaults and says nobody confirmed them", async () => {
+    withClarify();
+    const { summary } = await run({
+      implementer: [{ output: asks(QUESTION) }, { writes: { 'src/a.ts': 'export const a = 2;\n' }, output: REPORT }],
+      reviewer: [{ output: APPROVE }],
+    });
+    expect(summary.clarifications).toEqual([{ id: 'Q1', stage: 'before_coding', question: QUESTION.question, answer: 'no', source: 'default' }]);
+    expect(readPack(summary, 'rounds/1/implement-0/pack/CONTEXT.md')).toContain("→ no (the implementer's own recommendation; nobody confirmed it)");
+  });
+
+  it('reads the questions from the final message, since the turn cannot write files', async () => {
+    withClarify();
+    const { summary } = await run({
+      implementer: [{ final_text: '```json\n' + JSON.stringify(asks()) + '\n```' }, { writes: { 'src/a.ts': 'export const a = 2;\n' }, output: REPORT }],
+      reviewer: [{ output: APPROVE }],
+    });
+    expect(summary.outcome).toBe('converged');
+    expect(summary.clarifications).toEqual([]);
+    expect(events.some((e) => e.type === 'clarified' && e.clarifications.length === 0)).toBe(true);
+  });
+
+  it('keeps at most five questions', async () => {
+    withClarify();
+    const many = Array.from({ length: 7 }, (_, i) => ({ ...QUESTION, id: `Q${i + 1}` }));
+    const { summary } = await run({
+      implementer: [{ output: asks(...many) }, { writes: { 'src/a.ts': 'export const a = 2;\n' }, output: REPORT }],
+      reviewer: [{ output: APPROVE }],
+    });
+    expect(summary.clarifications.map((q) => q.id)).toEqual(['Q1', 'Q2', 'Q3', 'Q4', 'Q5']);
+    expect(warnings().some((w) => w.includes('asked 7 questions'))).toBe(true);
+  });
+
+  it('never fails the run when the clarify turn fails; the implementer starts fresh', async () => {
+    withClarify();
+    const { summary, fake } = await run({
+      implementer: [{ classification: 'crashed' }, { writes: { 'src/a.ts': 'export const a = 2;\n' }, output: REPORT }],
+      reviewer: [{ output: APPROVE }],
+    });
+    expect(summary.outcome).toBe('converged');
+    expect(warnings().some((w) => w.startsWith('clarify turn crashed'))).toBe(true);
+    expect(fake.jobs[1]!.resume).toBeUndefined();
+  });
+
+  it('is skipped when the task says clarify: false', async () => {
+    withClarify();
+    const { fake } = await run(
+      { implementer: [{ writes: { 'src/a.ts': 'export const a = 2;\n' }, output: REPORT }], reviewer: [{ output: APPROVE }] },
+      { task: TASK.replace('gates: [before_apply]', 'gates: [before_apply]\nclarify: false') },
+    );
+    expect(fake.jobs.map((j) => j.policy.fs)).toEqual(['workspace-write', 'workspace-write']);
+  });
+
+  it("surfaces the implementer's leftover questions and deliberate omissions", async () => {
+    const report = { ...REPORT, open_questions: ['Should a be configurable?'], did_not_do: ['No migration for old data.'] };
+    const { summary } = await run({
+      implementer: [{ writes: { 'src/a.ts': 'export const a = 2;\n' }, output: report }],
+      reviewer: [{ output: APPROVE }],
+    });
+    expect(summary.open_questions).toEqual(['Should a be configurable?']);
+    expect(summary.did_not_do).toEqual(['No migration for old data.']);
+    const stored = JSON.parse(readFileSync(join(summary.run_dir, 'summary.json'), 'utf8')) as RunSummary;
+    expect(stored.open_questions).toEqual(['Should a be configurable?']);
+  });
+});
+
+describe('asking mid-work', () => {
+  const Q = { id: 'Q1', question: 'Extend AuthMiddleware or SessionGuard?', why: 'Decides which layer changes.', options: ['AuthMiddleware', 'SessionGuard'], default: 'AuthMiddleware' };
+  const CHOICE = { id: 'D1', question: 'Error message wording', chosen: 'Invalid value', alternatives: ['Value must be 2'] };
+  const stop = (...questions: unknown[]) => ({ output: { ...REPORT, blocking_questions: questions } });
+  const done = (extra: object = {}) => ({ writes: { 'src/a.ts': 'export const a = 2;\n' }, output: { ...REPORT, ...extra } });
+  const setLoop = (loop: object): void => {
+    global = GlobalConfigSchema.parse({ ...global, loop: { ...global.loop, ...loop } });
+  };
+  const impl = (fake: { jobs: { role: string }[] }) => fake.jobs.filter((j) => j.role === 'implementer') as ReturnType<typeof createFakeAdapter>['jobs'];
+  const reviewerContext = (s: RunSummary): string => readFileSync(join(s.run_dir, 'rounds/1/review-1/pack/CONTEXT.md'), 'utf8');
+
+  it('tells an attended implementer to decide small things and stop only for costly guesses', async () => {
+    const { fake } = await run({ implementer: [done()], reviewer: [{ output: APPROVE }] }, { engine: { questions: async () => ({}) } });
+    expect(fake.jobs[0]!.prompt).toContain('Stop only for a question where a wrong guess would force redoing most of the work');
+    expect(fake.jobs[0]!.prompt).toContain('You may stop at most 3 more times');
+  });
+
+  it('tells an unattended implementer that nobody can answer', async () => {
+    const { fake } = await run({ implementer: [done()], reviewer: [{ output: APPROVE }] });
+    expect(fake.jobs[0]!.prompt).toContain('Nobody can answer questions during this run');
+  });
+
+  it('pauses on a blocking question and resumes the same session with the answer', async () => {
+    const seen: string[] = [];
+    const { summary, fake } = await run(
+      { implementer: [stop(Q), done()], reviewer: [{ output: APPROVE }] },
+      { engine: { questions: async ({ stage, questions }) => (seen.push(`${stage}:${questions[0]!.id}`), { Q1: 'SessionGuard' }) } },
+    );
+    expect(summary.outcome).toBe('converged');
+    expect(seen).toEqual(['blocking:Q1']);
+    const [first, resumed] = impl(fake);
+    expect(resumed!.resume?.session_ref).toBe('fake-session-1');
+    expect(resumed!.prompt).toContain('Your questions have been answered');
+    expect(resumed!.prompt).toContain('Extend AuthMiddleware or SessionGuard? → SessionGuard');
+    expect(first!.cwd_abs).toBe(resumed!.cwd_abs);
+    expect(store.workerRuns(summary.run_id).map((w) => w.purpose)).toEqual(['work', 'answer', 'work']);
+    expect(summary.clarifications).toEqual([{ id: 'Q1', stage: 'blocking', question: Q.question, answer: 'SessionGuard', source: 'operator' }]);
+    expect(reviewerContext(summary)).toContain('→ SessionGuard (the operator decided)');
+  });
+
+  it("uses the recommendation when nobody is there, and says nobody confirmed it", async () => {
+    const { summary } = await run({ implementer: [stop(Q), done()], reviewer: [{ output: APPROVE }] });
+    expect(summary.clarifications[0]).toMatchObject({ stage: 'blocking', answer: 'AuthMiddleware', source: 'default' });
+    expect(reviewerContext(summary)).toContain("→ AuthMiddleware (the implementer's own recommendation; nobody confirmed it)");
+  });
+
+  it('stops asking the operator once the allowance is used, and says so', async () => {
+    setLoop({ max_question_stops: 1 });
+    const seen: string[] = [];
+    const { summary, fake } = await run(
+      { implementer: [stop(Q), stop({ ...Q, id: 'Q2', question: 'Second question?' }), done()], reviewer: [{ output: APPROVE }] },
+      { engine: { questions: async ({ questions }) => (seen.push(questions[0]!.id), { [questions[0]!.id]: 'SessionGuard' }) } },
+    );
+    expect(seen).toEqual(['Q1']);
+    expect(summary.clarifications.map((c) => [c.id, c.source])).toEqual([['Q1', 'operator'], ['Q2', 'default']]);
+    expect(impl(fake)[1]!.prompt).toContain('You have used every stop allowed in this run');
+  });
+
+  it('never waits forever: after the timeout the recommendation stands', async () => {
+    setLoop({ answer_timeout_ms: 50 });
+    const { summary } = await run(
+      { implementer: [stop(Q), done()], reviewer: [{ output: APPROVE }] },
+      { engine: { questions: ({ signal }) => new Promise((resolve) => signal.addEventListener('abort', () => resolve({}))) } },
+    );
+    expect(summary.outcome).toBe('converged');
+    expect(summary.clarifications[0]).toMatchObject({ answer: 'AuthMiddleware', source: 'default' });
+    expect(warnings().some((w) => w.startsWith('no answer within'))).toBe(true);
+  });
+
+  it("shows the implementer's own choices before review; accepting them costs no extra turn", async () => {
+    const shown: string[] = [];
+    const { summary, fake } = await run(
+      { implementer: [done({ decisions_made: [CHOICE] })], reviewer: [{ output: APPROVE }] },
+      { engine: { questions: async () => ({}), choices: async ({ choices }) => (shown.push(...choices.map((c) => c.id)), {}) } },
+    );
+    expect(shown).toEqual(['D1']);
+    expect(impl(fake)).toHaveLength(1);
+    expect(summary.clarifications).toEqual([{ id: 'D1', stage: 'own_choice', question: CHOICE.question, answer: 'Invalid value', source: 'operator' }]);
+    expect(reviewerContext(summary)).toContain("→ Invalid value (the implementer's choice, accepted by the operator)");
+  });
+
+  it('sends an overruled choice back to the implementer, re-verifies, then reviews', async () => {
+    const { summary, fake } = await run(
+      {
+        implementer: [done({ decisions_made: [CHOICE] }), { writes: { 'src/a.ts': "export const a = 2; // 'Value must be 2'\n" }, output: REPORT }],
+        reviewer: [{ output: APPROVE }],
+      },
+      { engine: { questions: async () => ({}), choices: async () => ({ D1: 'Value must be 2' }) } },
+    );
+    expect(summary.outcome).toBe('converged');
+    const fix = impl(fake)[1]!;
+    expect(fix.resume?.session_ref).toBe('fake-session-1');
+    expect(fix.prompt).toContain('The operator overruled your choice: Error message wording');
+    expect(fix.prompt).toContain('The operator decided: Value must be 2');
+    expect(store.verificationSteps(summary.run_id).map((s) => s.attempt)).toEqual([0, 1]);
+    expect(summary.clarifications[0]).toMatchObject({ stage: 'own_choice', answer: 'Value must be 2', overruled_from: 'Invalid value' });
+    expect(reviewerContext(summary)).toContain('→ Value must be 2 (the operator decided, replacing the implementer\'s choice "Invalid value")');
+    expect(fake.jobs.map((j) => j.role)).toEqual(['implementer', 'implementer', 'reviewer']);
+  });
+
+  it('records own choices as unconfirmed when nobody is there', async () => {
+    const { summary, fake } = await run({ implementer: [done({ decisions_made: [CHOICE] })], reviewer: [{ output: APPROVE }] });
+    expect(impl(fake)).toHaveLength(1);
+    expect(summary.clarifications[0]).toMatchObject({ stage: 'own_choice', source: 'default' });
+  });
+
+  it('does not lose a choice made in an earlier fix attempt', async () => {
+    const shown: string[] = [];
+    await run(
+      {
+        implementer: [
+          { writes: { 'src/a.ts': 'export const a = 3;\n' }, output: { ...REPORT, decisions_made: [CHOICE] } },
+          done(),
+        ],
+        reviewer: [{ output: APPROVE }],
+      },
+      { engine: { questions: async () => ({}), choices: async ({ choices }) => (shown.push(...choices.map((c) => c.id)), {}) } },
+    );
+    expect(shown).toEqual(['D1']);
+  });
+});
+

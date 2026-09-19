@@ -28,6 +28,12 @@ export const LoopConfigSchema = z.object({
   require_cross_vendor_review: z.enum(['enforce', 'warn', 'off']).default('warn'),
   /** Run the repo's checks on the untouched base commit before spending any worker quota. */
   verify_baseline: z.boolean().default(true),
+  /** Before coding, the implementer spends one read-only turn listing what it would ask the operator. */
+  clarify: z.boolean().default(true),
+  /** How many times per run the implementer may stop mid-work to ask a blocking question. */
+  max_question_stops: z.number().int().nonnegative().default(3),
+  /** How long a question or choice waits for the operator before the implementer's recommendation is used. */
+  answer_timeout_ms: z.number().int().positive().default(15 * 60_000),
 });
 export type LoopConfig = z.infer<typeof LoopConfigSchema>;
 

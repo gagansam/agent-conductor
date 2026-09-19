@@ -107,6 +107,22 @@ conductor apply           # patch onto your checkout; nothing staged, nothing co
 A run first proves your checks pass on the untouched base commit, and stops with no quota spent if they do not.
 With a red baseline an implementer ends up repairing (or gaming) your checks instead of doing the task.
 
+Workers run headless and cannot ask you anything mid-task, so before any code is written the implementer gets one
+read-only turn to list what it would ask, each question with a proposed default:
+
+```
+QUESTIONS  The implementer has 1 question(s) before it starts. Enter accepts its proposed answer.
+  Q1. How should divide(a, b) behave when b is 0?
+      answer [return JS native result (Infinity/-Infinity/NaN), no throw]: throw a RangeError
+```
+
+During the work the implementer decides small things itself and stops only when a wrong guess would waste the work,
+for example which module a change belongs in. It then resumes the same session with your answer. After the checks
+pass, and before review, it shows you the small choices it made on its own; Enter accepts them all, or you overrule
+some and it applies your decision. Your answers become binding decisions for the implementer and the reviewer.
+Without a terminal nothing waits: every assumption is listed at the end instead. `--no-clarify` (or
+`clarify: false` in a task) skips the up-front questions.
+
 ## Development
 
 ```sh

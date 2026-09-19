@@ -9,7 +9,7 @@ correction is listed here.
 
 Milestone 1 (the walking skeleton in [10-milestones.md](10-milestones.md)) is
 built, plus the parts of milestone 2 that came almost free once the pieces
-existed. 79 tests pass (`pnpm test`); `pnpm typecheck` and `pnpm build` are
+existed. 99 tests pass (`pnpm test`); `pnpm typecheck` and `pnpm build` are
 clean.
 
 | Package | State |
@@ -22,6 +22,11 @@ clean.
 | `cli` | `init` (interactive: global defaults, then per-repo config detected from manifests and confirmed question by question), `doctor` (`--live`, `--record`, `--verify`), `run` (with `-i/--implementer`, `-r/--reviewer` role overrides), `list`, `show`, `apply` |
 
 Engine behaviour that is implemented and tested: baseline verification,
+the clarify turn (questions before coding, answers as binding decisions),
+mid-work stops for blocking questions with resume in the same session, the
+checkpoint for the implementer's own choices before review (with overrules
+sent back as fixes), bounded waiting for answers, setup artifacts kept out of
+the patch,
 fix sub-rounds while verification is red, review only on green, parallel
 reviewers in throwaway worktrees, confirmation of `test` / `command` /
 `acceptance` / `none` reproductions, harvested reproductions joining the
@@ -122,6 +127,50 @@ That test now aborts on the `worker_started` event, and the abort-before-any-
 worker path has its own test. The suite then passed three times with a
 typecheck running concurrently. The cause is inferred, not proven. If a
 failure recurs, capture it: `pnpm test 2>&1 | tee test.log`.
+
+### 6. The clarify step, live
+
+Two runs of the same deliberately ambiguous task ("add `divide(a, b)`", with
+division by zero left unspecified) on a sample repo, Claude Sonnet as
+implementer.
+
+- **First prompt: no question.** The clarify turn decided the code's
+  convention (no input validation) answered it, then the implementer listed
+  division by zero under `open_questions` *after* doing the work: the exact
+  failure the step exists to prevent. The prompt now says unspecified edge
+  cases count even when the code suggests a convention, which becomes the
+  proposed default.
+- **Second prompt: the right question.** "How should `divide(a, b)` behave
+  when b is 0?", with options and the convention as default. Answered at the
+  terminal with "throw a RangeError"; the resumed implementer (same session
+  id) implemented and tested exactly that; converged in 1.7 minutes.
+- **A real bug the first run exposed:** `conductor init` offers to add
+  `.conductor/` to the clone's local exclude file, and `git add` refuses a
+  pathspec naming an ignored path, so every run on such a repo crashed at
+  patch extraction. The redundant pathspecs are gone and a regression test
+  covers it.
+
+### 7. Asking mid-work, live
+
+Two runs of a task that does not say which of two arithmetic modules
+(`lib/math.js` for billing, `src/calc.js` for reporting) should get a new
+`divide`, with `--no-clarify` so the question could only come up mid-work.
+
+- **First prompt: it hedged.** The implementer noticed the ambiguity, wrote
+  its choice as a question, then added `divide` to *both* modules and recorded
+  that as a small choice. The checkpoint still showed it before review, so it
+  could have been overruled, but it should have been a stop. The prompt now
+  says hedging is the signal to stop.
+- **Second prompt: it stopped.** "Should divide(a, b) go in lib/math.js
+  (billing) or src/calc.js (reporting)?", with options and a recommendation;
+  resumed in the same session after the answer, then recorded two small
+  choices. Overruling the division-by-zero one sent it back as a fix; the
+  result threw `RangeError` as decided. Work, answer and fix turns shared one
+  session id; converged in under two minutes.
+- **A leak the run exposed:** the sample repo had no lockfile, so setup's
+  `npm install` wrote one, and it ended up in the patch as if the implementer
+  had written it. The engine now records what setup changed and keeps those
+  files out of every patch while they are still as setup left them.
 
 ## Where the code departs from the design documents
 

@@ -10,19 +10,29 @@ export class Prompter {
   private rl: Interface | undefined;
   private closed = false;
 
-  constructor(yes: boolean) {
+  constructor(
+    yes: boolean,
+    private readonly opts: { onInterrupt?: () => void } = {},
+  ) {
     this.interactive = !yes && process.stdin.isTTY === true && process.stdout.isTTY === true;
   }
 
-  /** Enter accepts `def`. `validate` returns an error message, or undefined when the answer is fine. */
-  async ask(question: string, def: string, validate?: (answer: string) => string | undefined): Promise<string> {
-    if (!this.interactive || this.closed) return def;
+  /**
+   * Enter accepts `def`. `validate` returns an error message, or undefined when the answer is fine.
+   * Aborting `signal` (a timeout) gives up on this question with `def` and keeps prompting for later ones.
+   */
+  async ask(question: string, def: string, validate?: (answer: string) => string | undefined, signal?: AbortSignal): Promise<string> {
+    if (!this.interactive || this.closed || signal?.aborted) return def;
     this.rl ??= this.open();
     for (;;) {
       let answer: string;
       try {
-        answer = (await this.rl.question(`${question}${def ? c.dim(` [${def}]`) : ''}: `)).trim();
+        answer = (await this.rl.question(`${question}${def ? c.dim(` [${def}]`) : ''}: `, signal ? { signal } : {})).trim();
       } catch {
+        if (signal?.aborted) {
+          process.stdout.write('\n');
+          return def;
+        }
         // Ctrl-D: stop asking, take defaults from here on.
         this.closed = true;
         process.stdout.write('\n');
@@ -46,10 +56,14 @@ export class Prompter {
 
   private open(): Interface {
     const rl = createInterface({ input: process.stdin, output: process.stdout });
-    // readline swallows Ctrl-C by default; make it quit like everywhere else.
+    // readline swallows Ctrl-C by default. Without a handler, quit; with one, hand it over and stop asking,
+    // so a pending question resolves to its default instead of hanging.
     rl.on('SIGINT', () => {
       process.stdout.write('\n');
-      process.exit(130);
+      if (!this.opts.onInterrupt) process.exit(130);
+      this.opts.onInterrupt();
+      this.closed = true;
+      rl.close();
     });
     return rl;
   }

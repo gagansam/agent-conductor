@@ -75,6 +75,8 @@ export const TaskFileSchema = z.object({
   budget: BudgetSchema.partial().default({}),
   routing: z.record(z.string(), RoleTargetSchema).default({}),
   gates: z.array(GateSchema).optional(),
+  /** Let the implementer ask its questions before coding. Default: loop.clarify from config. */
+  clarify: z.boolean().optional(),
   reference: z.array(z.string()).default([]),
 });
 export type TaskFile = z.infer<typeof TaskFileSchema>;
@@ -95,6 +97,7 @@ export const TaskSpecSchema = z.object({
   budget: BudgetSchema,
   routing: z.record(z.string(), RoleTargetSchema),
   gates: z.array(GateSchema),
+  clarify: z.boolean(),
   reference: z.array(z.string()),
 });
 export type TaskSpec = z.infer<typeof TaskSpecSchema>;

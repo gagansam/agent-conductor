@@ -16,7 +16,7 @@ const USAGE = `conductor — drive coding-agent CLIs through an implement → ve
            [--verify]                    run setup + every check in a fresh worktree at HEAD (no model calls)
            [--live <provider>]           run live conformance against a provider (uses quota)
            [--record <dir>]              save the live runs as offline fixtures
-  conductor run <task.md> [--repo <path>] [--verbose] [--no-gates] [--skip-baseline] [--json]
+  conductor run <task.md> [--repo <path>] [--verbose] [--no-gates] [--no-clarify] [--skip-baseline] [--json]
            [-i|--implementer <provider>/<model>[:<effort>]]   e.g. claude/opus:high
            [-r|--reviewer <provider>/<model>[:<effort>] | none]  e.g. codex/default, or none to skip review
                                          <model> is a label from config or a raw model id
@@ -41,6 +41,7 @@ async function main(argv: string[]): Promise<number> {
       verbose: { type: 'boolean', short: 'v', default: false },
       'no-gates': { type: 'boolean', default: false },
       'skip-baseline': { type: 'boolean', default: false },
+      'no-clarify': { type: 'boolean', default: false },
       json: { type: 'boolean', default: false },
       advice: { type: 'boolean', default: false },
       '3way': { type: 'boolean', default: false },
@@ -60,7 +61,7 @@ async function main(argv: string[]): Promise<number> {
     case 'run': {
       const file = positionals[0];
       if (!file) return process.stderr.write('usage: conductor run <task.md>\n'), 64;
-      return run(file, { ...(values.repo ? { repo: values.repo } : {}), verbose: values.verbose, noGates: values['no-gates'], skipBaseline: values['skip-baseline'], json: values.json, ...(values.implementer ? { implementer: values.implementer } : {}), ...(values.reviewer ? { reviewer: values.reviewer } : {}) });
+      return run(file, { ...(values.repo ? { repo: values.repo } : {}), verbose: values.verbose, noGates: values['no-gates'], noClarify: values['no-clarify'], skipBaseline: values['skip-baseline'], json: values.json, ...(values.implementer ? { implementer: values.implementer } : {}), ...(values.reviewer ? { reviewer: values.reviewer } : {}) });
     }
     case 'list':
       return list({ json: values.json });

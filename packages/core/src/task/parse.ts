@@ -68,6 +68,7 @@ export function parseTask(text: string, opts: ParseTaskOptions): TaskSpec {
     },
     routing: f.routing,
     gates: f.gates ?? opts.global.gates.default,
+    clarify: f.clarify ?? opts.global.loop.clarify,
     reference: f.reference,
   };
 }

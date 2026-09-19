@@ -3,7 +3,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import type { Classification, SandboxPolicy, WorkerEvent, WorkerHandle, WorkerJob, WorkerResult } from '@agent-conductor/adapter-api';
 import type { ResolvedTarget } from '../config/load.js';
 import type { LoopConfig } from '../config/schema.js';
-import { OUT_DIR_REL, roleOutput } from '../contracts/json-schema.js';
+import { OUT_DIR_REL, outputSpec, type OutputKind } from '../contracts/json-schema.js';
 import type { Role } from '../contracts/task.js';
 import type { Observer } from '../events.js';
 import { ulid } from '../ids.js';
@@ -29,7 +29,9 @@ export interface DispatchRequest {
   round: number;
   role: Role;
   attempt: number;
-  purpose: 'work' | 'fix' | 'repair';
+  purpose: 'work' | 'fix' | 'repair' | 'clarify' | 'answer';
+  /** Defaults to the role's own output. */
+  output_kind?: OutputKind;
   target: ResolvedTarget;
   cwd_abs: string;
   prompt: string;
@@ -117,7 +119,7 @@ export class Dispatcher {
     this.used++;
 
     const resume = req.resume_session && provider.caps.resume ? { session_ref: req.resume_session } : undefined;
-    const out = roleOutput(req.role);
+    const out = outputSpec(req.output_kind ?? req.role);
     const job: WorkerJob = {
       worker_run_id,
       role: req.role,

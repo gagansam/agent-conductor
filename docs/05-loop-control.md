@@ -52,6 +52,78 @@ turns it off for repos whose suite is too slow to run twice.
 Related guard: the patch's deleted files are always surfaced to the operator,
 because deleting a test is the cheapest way to turn a check green.
 
+## Before round 1: the implementer asks its questions
+
+Added after the operator asked whether headless workers, which cannot ask
+questions, produce worse work. For ambiguous tasks they can: a worker that
+guesses a judgment call (what happens on division by zero, whether admins
+still see archived rows) produces a change that passes every check and every
+review and is still wrong, because only the operator knows the answer.
+
+So before any code is written, the implementer gets one **read-only** turn
+([templates/clarify.md](../packages/core/templates/clarify.md)): read the task
+and the code, and list up to five questions whose answer would change what it
+builds, each with the default it would choose. Unspecified edge cases and
+error behaviour count, even when the code suggests a convention; the
+convention becomes the default. Because the turn cannot write files, the
+questions come back as its final message, validated against
+`QuestionsOutputSchema`, with the usual single repair turn.
+
+- **At a terminal**, the run pauses and shows each question; Enter accepts
+  the proposed default. Ctrl-C at the prompt stops the run.
+- **Without one** (or `--no-gates`), the defaults are used and every assumed
+  answer is listed in the summary.
+- Each answer becomes a **binding decision** in every later pack (`CONTEXT.md`,
+  "Decisions already made"), marked as decided by the operator or assumed.
+  The reviewer is told that contradicting a decision is a `spec-mismatch` and
+  that re-opening one is not its job. This is what a normal chat cannot do:
+  the reviewer checks the work against the operator's answer, not against its
+  own guess.
+- The implementer then **resumes the same session**, so the reading it did is
+  not paid for twice.
+- A failed clarify turn never fails the run; the implementer starts fresh.
+- On by default (`loop.clarify`); `clarify: false` in a task or
+  `conductor run --no-clarify` skips it.
+
+Observed cost on the first live runs (Claude Sonnet, a two-file task): 50–70 s
+and about 12 k uncached input and 4.5 k output tokens, one worker run from the
+budget. The implementer's own `open_questions` and `did_not_do` are still
+collected after the work and shown by `conductor show` and the run summary.
+
+## During the work: stop only when a wrong guess wastes the work
+
+The clarify turn catches what can be seen up front. Some questions only
+appear once the implementer is in the code. Interactive Claude Code would ask
+there and then; a headless worker cannot, so the implementer prompt gives it a
+rule (`askingSection` in [pack/render.ts](../packages/core/src/pack/render.ts)):
+
+| Kind | Example | Implementer | Operator |
+|---|---|---|---|
+| **Blocking**: a wrong answer means redoing most of the work | which module, file or layer the change belongs in; a data model or API shape | stops: writes `blocking_questions` with options and a recommended default, ends its turn | answers at the terminal; the implementer resumes the same session where it stopped |
+| **Small**: cheap to change later | error wording, a default value, which of two equivalent helpers | decides, records it under `decisions_made` with the rejected alternatives, carries on | sees every such choice in one batch after checks pass and before review; Enter accepts all, or overrule some |
+
+- **Overrules** go back to the implementer as fixes in the same session, and
+  verification runs again before review.
+- **Hedging counts as a reason to stop.** Building two alternatives to avoid
+  choosing (the same function in two modules) is exactly what the rule is for.
+- **Unattended runs never stop.** The prompt says nobody can answer, so the
+  implementer decides everything and records it. The summary lists every
+  unconfirmed assumption, and the reviewer is told it may challenge those.
+- **Waiting is bounded.** A question or choice not answered within
+  `loop.answer_timeout_ms` (15 min) takes the implementer's recommendation,
+  marked unconfirmed.
+- **At most `loop.max_question_stops` (3) stops per run.** After that the
+  prompt says it cannot stop again, and any further stop is answered with its
+  own recommendation without interrupting the operator.
+- **One choices checkpoint per round.** Choices made while applying overrules
+  are recorded as unconfirmed rather than asked about again.
+
+Every answer, from all three stages, becomes a binding decision in later packs
+and a row in `gate_decisions`, so stops per run and overrule rates per model
+can be counted. If an operator almost never overrules, the implementer is
+asking too much; if the choices batch is often overruled, those should have
+been stops.
+
 ## The round state machine
 
 ```mermaid

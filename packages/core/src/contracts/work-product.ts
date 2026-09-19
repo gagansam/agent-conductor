@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { OwnChoiceSchema, QuestionSchema } from './clarify.js';
 
 export const ClaimSchema = z.object({
   text: z.string(),
@@ -22,7 +23,12 @@ export const ImplementerReportSchema = z.object({
     )
     .default([]),
   claims: z.array(ClaimSchema).default([]),
+  /** Follow-ups for the operator that did not affect this change. */
   open_questions: z.array(z.string()).default([]),
+  /** Set only when the implementer stopped mid-work: a wrong guess here would force redoing most of the work. */
+  blocking_questions: z.array(QuestionSchema).default([]),
+  /** Judgment calls it made itself because they are cheap to change; reviewed by the operator before code review. */
+  decisions_made: z.array(OwnChoiceSchema).default([]),
   risks: z.array(z.string()).default([]),
   did_not_do: z.array(z.string()).default([]),
 });
