@@ -1,17 +1,23 @@
-import { resolve } from 'node:path';
+import { existsSync, readFileSync, statSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import {
   applyRoleOverrides,
+  findSavedTask,
   loadRepoConfig,
-  parseTaskFile,
+  parseTask,
+  registerRepo,
   resolveRoles,
   runTask,
+  sentenceTask,
+  taskRepoHint,
+  UserError,
   type ChoicesHandler,
   type GateHandler,
   type QuestionsHandler,
   type ResolvedTarget,
 } from '@agent-conductor/core';
 import { loadAdapters } from '../adapters.js';
-import { openContext, resolveRepo } from '../context.js';
+import { chooseRepo, openContext } from '../context.js';
 import { c, consoleObserver, findingLine, printSummary } from '../print.js';
 import { Prompter, splitList } from '../prompt.js';
 
@@ -83,7 +89,23 @@ function choicesHandler(p: Prompter, run: AbortSignal): ChoicesHandler {
   };
 }
 
-export async function run(taskFile: string, flags: RunFlags): Promise<number> {
+interface TaskSource {
+  text: string;
+  file?: string;
+  sentence: boolean;
+}
+
+/** A task file, a saved task's name (see `conductor tasks`), or a sentence describing the change. */
+function readTaskArg(arg: string, ctx: ReturnType<typeof openContext>): TaskSource {
+  const asPath = resolve(arg);
+  if (existsSync(asPath) && statSync(asPath).isFile()) return { text: readFileSync(asPath, 'utf8'), file: asPath, sentence: false };
+  const saved = findSavedTask(ctx.paths, arg);
+  if (saved) return { text: readFileSync(saved.path, 'utf8'), file: saved.path, sentence: false };
+  if (/\s/.test(arg.trim())) return { text: sentenceTask(arg), sentence: true };
+  throw new UserError(`"${arg}" is not a task file, a saved task (see \`conductor tasks\`), or a sentence describing the change`);
+}
+
+export async function run(taskArg: string, flags: RunFlags): Promise<number> {
   const ctx = openContext();
   const ac = new AbortController();
   let interrupts = 0;
@@ -98,9 +120,12 @@ export async function run(taskFile: string, flags: RunFlags): Promise<number> {
   // One prompt for gates and questions. At a prompt the terminal is in raw mode, so Ctrl-C arrives here, not as a signal.
   const prompter = new Prompter(flags.noGates || flags.json, { onInterrupt: onSigint });
   try {
-    const repo = await resolveRepo(flags.repo);
+    const source = readTaskArg(taskArg, ctx);
+    const hint = source.file ? taskRepoHint(source.text) : undefined;
+    const repo = await chooseRepo({ paths: ctx.paths, flag: flags.repo, taskHint: hint && source.file ? { ref: hint, base_dir: dirname(source.file) } : undefined, prompter });
+    registerRepo(ctx.paths, repo);
     const repoCfg = loadRepoConfig(repo);
-    const parsed = parseTaskFile(resolve(taskFile), { repo_abs: repo, global: ctx.global });
+    const parsed = parseTask(source.text, { repo_abs: repo, global: ctx.global });
     const applied = applyRoleOverrides(ctx.global, repoCfg, parsed, {
       ...(flags.implementer ? { implementer: flags.implementer } : {}),
       ...(flags.reviewer ? { reviewer: flags.reviewer } : {}),
@@ -112,6 +137,9 @@ export async function run(taskFile: string, flags: RunFlags): Promise<number> {
     const reviewers = roles.reviewers.slice(0, task.budget.max_reviewers);
     if (!flags.json) {
       for (const n of notes) out(`${c.yellow('note')} ${n}`);
+      if (source.sentence) out(c.dim('quick task: the sentence is the whole spec; `conductor task` writes a precise one with acceptance checks'));
+      else out(`${c.dim('task')}   ${source.file}`);
+      out(`${c.dim('repo')}   ${repo}`);
       const review = reviewers.length ? reviewers.map(describeTarget).join(', ') : 'none (implement → verify only)';
       out(`${c.dim('roles')}  implementer ${describeTarget(roles.implementer)}  ·  reviewer ${review}`);
       if (!task.clarify) out(c.dim('clarify off: the implementer starts coding without asking questions first'));

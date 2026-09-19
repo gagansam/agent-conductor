@@ -31,6 +31,7 @@ export interface Paths {
   hooks: string;
   stopFile: string;
   globalConfig: string;
+  tasks: string;
 }
 
 export function pathsFor(home: string): Paths {
@@ -43,6 +44,7 @@ export function pathsFor(home: string): Paths {
     hooks: join(home, 'hooks'),
     stopFile: join(home, 'STOP'),
     globalConfig: join(home, 'config.yaml'),
+    tasks: join(home, 'tasks'),
   };
 }
 

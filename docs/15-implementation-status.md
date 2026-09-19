@@ -9,7 +9,7 @@ correction is listed here.
 
 Milestone 1 (the walking skeleton in [10-milestones.md](10-milestones.md)) is
 built, plus the parts of milestone 2 that came almost free once the pieces
-existed. 99 tests pass (`pnpm test`); `pnpm typecheck` and `pnpm build` are
+existed. 112 tests pass (`pnpm test`); `pnpm typecheck` and `pnpm build` are
 clean.
 
 | Package | State |
@@ -19,7 +19,7 @@ clean.
 | `adapter-claude` | Detect, capability probe from `--help`, argv with droppable optional flags, stream-json parser, classifier. **Passes live conformance on 2.1.263** |
 | `adapter-codex` | Same, for both JSONL dialects (0.3x `{id,msg}` and 0.1xx thread/turn/item), isolated `CODEX_HOME` with symlinked auth. Passes offline conformance on 0.36.0 and 0.145.0. **Live success path not yet verified** |
 | `core` | zod contracts + JSON Schema export; config and task parsing; worktree isolation with refusing hooks; temp-index patch extraction; harvest with tamper restore; audit; pack rendering with instruction inlining and lint; verifier with junit / tsc / eslint parsers; confirmer; dispatcher with DB leases, supervision and two retry policies; SQLite store (full schema from doc 07); the round engine |
-| `cli` | `init` (interactive: global defaults, then per-repo config detected from manifests and confirmed question by question), `doctor` (`--live`, `--record`, `--verify`), `run` (with `-i/--implementer`, `-r/--reviewer` role overrides), `list`, `show`, `apply` |
+| `cli` | `init` (interactive: global defaults, then per-repo config detected from manifests and confirmed question by question), `task` (a read-only model turn drafts the task, then every field is reviewed; `--manual` skips the draft), `tasks`, `doctor` (`--live`, `--record`, `--verify`), `run` (a task file, a saved task's name, or a sentence; `-i/--implementer`, `-r/--reviewer` role overrides), `list`, `show`, `apply`. One rule picks the repository everywhere: `--repo` name or path, the task's `repo:`, the current repo, or a question in a folder of repositories |
 
 Engine behaviour that is implemented and tested: baseline verification,
 the clarify turn (questions before coding, answers as binding decisions),
@@ -171,6 +171,26 @@ Two runs of a task that does not say which of two arithmetic modules
   `npm install` wrote one, and it ended up in the patch as if the implementer
   had written it. The engine now records what setup changed and keeps those
   files out of every patch while they are still as setup left them.
+
+### 8. Drafting tasks, live
+
+`conductor task "add a divide function next to the existing helpers, it
+should not crash on zero"` on the two-module sample repo, Claude Sonnet
+drafting, every field accepted as proposed.
+
+- **First prompt:** a usable task, but its checks were inline `node -e`
+  scripts and one criterion was "the full suite passes", which already passes
+  and proves nothing.
+- **Sharpened prompt** (a check must fail today; the repo's own checks are
+  never a criterion; prefer a named test in the repo's style): each criterion
+  names a test and its check is
+  `grep -q "divide by zero does not throw" test/math.test.js && node --test test/math.test.js`,
+  which fails until that test exists and passes. It chose `lib/math.js` and
+  put the module ambiguity in its notes for the implementer to ask about.
+
+Drafted checks are not run before the operator approves the task: they are
+model-written commands, and they first run at the baseline and verification
+steps of an approved run.
 
 ## Where the code departs from the design documents
 

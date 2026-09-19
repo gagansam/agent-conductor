@@ -7,6 +7,7 @@ import {
   describePlan,
   ensureHooksDir,
   git,
+  isExternalSource,
   loadInstructions,
   loadRepoConfig,
   prepareProviders,
@@ -23,7 +24,7 @@ import {
   type TaskSpec,
 } from '@agent-conductor/core';
 import { loadAdapters } from '../adapters.js';
-import { openContext, resolveRepo } from '../context.js';
+import { chooseRepo, openContext } from '../context.js';
 import { c } from '../print.js';
 
 const out = (s = ''): void => void process.stdout.write(`${s}\n`);
@@ -83,7 +84,7 @@ export async function doctor(flags: DoctorFlags): Promise<number> {
     }
 
     if (flags.repo !== undefined || flags.verify || existsSync(join(process.cwd(), '.git'))) {
-      const repo = await resolveRepo(flags.repo);
+      const repo = await chooseRepo({ paths: ctx.paths, flag: flags.repo });
       failures += await doctorRepo(repo, ctx.global);
       if (flags.verify && !(await verifyRepo(repo, ctx.paths))) failures++;
     } else {
@@ -134,12 +135,13 @@ async function doctorRepo(repo: string, global: Parameters<typeof resolveRoles>[
   else if (cfg.verification.length) out(c.dim(describePlan(buildPlan(cfg, NO_TASK)).replace(/^/gm, '    ')));
   if (!cfg.setup.run) warn('setup.run is not set: fresh worktrees get no dependency install');
 
-  const instr = await loadInstructions(repo, cfg.instructions.sources);
-  ok(`instructions: ${instr.docs.length} document(s) inlined into every pack`);
+  const instr = await loadInstructions(repo, cfg.instructions.sources, { repo_abs: repo });
+  const outside = instr.docs.filter((d) => isExternalSource(d.source)).length;
+  ok(`instructions: ${instr.docs.length} document(s) inlined into every pack${outside ? ` (${outside} from outside the repo, read from disk when a run starts)` : ''}`);
   for (const w of instr.warnings) warn(`instructions: ${w.source}: ${w.message}`);
   // Runs read instructions from the base commit, not from this checkout.
   const tracked = new Set((await git(repo, ['ls-files', '-z'])).stdout.split('\0').filter(Boolean));
-  for (const d of instr.docs) if (!tracked.has(d.source)) warn(`instructions: ${d.source} is not committed; runs read the committed version and will not see it`);
+  for (const d of instr.docs) if (!isExternalSource(d.source) && !tracked.has(d.source)) warn(`instructions: ${d.source} is not committed; runs read the committed version and will not see it`);
 
   // One source of truth: AGENTS.md is canonical, CLAUDE.md only imports it (docs/08).
   const claudeMd = join(repo, 'CLAUDE.md');

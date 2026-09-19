@@ -260,7 +260,7 @@ class Run {
     const baseline = await this.verifyBaseline();
     if (baseline) return baseline;
 
-    const instructions = await loadInstructions(this.impl, this.repoCfg.instructions.sources);
+    const instructions = await loadInstructions(this.impl, this.repoCfg.instructions.sources, { repo_abs: this.task.repo.path_abs });
     for (const w of instructions.warnings) this.observer({ type: 'warning', message: `instructions: ${w.source}: ${w.message}` });
     this.baseStatic = {
       schema_version: 1,

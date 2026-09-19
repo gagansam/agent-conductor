@@ -79,11 +79,24 @@ policy:
 Commit it, or keep it local: `init` offers to add `.conductor/` to the clone's local exclude file. Runs read it
 from your working copy either way.
 
-Write a task ([format](docs/03-contracts.md#8-example-a-task-file)):
+Give it a task, one of three ways:
+
+```sh
+conductor run "Add divide(a, b) to lib/math.js with tests" --repo myrepo   # a sentence is a task
+conductor task                        # answer questions; a read-only model turn drafts it first
+conductor run 2026-09-19-add-divide   # a saved task, by name, from any folder
+```
+
+`conductor task` asks what should change, lets a model read the repo and draft the task (a precise description,
+acceptance criteria with runnable checks, the files involved), then walks you through every field: Enter keeps,
+`-` removes, or type your own. It saves the task under `~/.conductor/tasks/<repo>/`, offers to run it, and
+`conductor tasks` lists what you have saved. `--manual` skips the draft. A task file you write yourself works too
+([format](docs/03-contracts.md#8-example-a-task-file)):
 
 ```markdown
 ---
 title: Add "archive" action to project list
+repo: myrepo
 acceptance:
   - id: AC1
     text: Archived projects are excluded from the default list query
@@ -93,15 +106,18 @@ touch_hint: ["src/projects/**"]
 Users need to archive projects without deleting them. Follow the pattern in `src/projects/favorite.ts`.
 ```
 
-Run it:
+The repository is `--repo` (a name from `conductor init`, or a path), else the task's `repo:`, else the repo you
+are in. In a folder that holds several repositories, the conductor asks which one.
+
+Run it and look at the result:
 
 ```sh
-conductor run task.md --repo ~/code/myrepo
+conductor run task.md
 conductor run task.md -i claude/opus:high -r codex/default   # pick implementer / reviewer for this run
 conductor run task.md -r none                                # implement → verify only, no review
 conductor list            # every run, across repos
 conductor show            # rounds, workers, checks, findings with their confirmation status
-conductor apply           # patch onto your checkout; nothing staged, nothing committed
+conductor apply           # patch onto your working copy; nothing staged, nothing committed
 ```
 
 A run first proves your checks pass on the untouched base commit, and stops with no quota spent if they do not.

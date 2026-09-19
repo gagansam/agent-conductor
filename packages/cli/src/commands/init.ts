@@ -1,7 +1,8 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join, relative, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import { capture, findBinary } from '@agent-conductor/adapter-api';
 import {
+  childRepos,
   commandPattern,
   conductorHome,
   detectRepo,
@@ -9,13 +10,14 @@ import {
   loadRepoConfig,
   parseRoleSpec,
   pathsFor,
+  registerRepo,
   renderRepoConfig,
   repoConfigPath,
   repoRoot,
   type Paths,
   type RoleSpec,
 } from '@agent-conductor/core';
-import { resolveRepo } from '../context.js';
+import { chooseRepo } from '../context.js';
 import { c } from '../print.js';
 import { Prompter, splitList } from '../prompt.js';
 import { verifyRepo } from './doctor.js';
@@ -71,11 +73,18 @@ export async function init(flags: InitFlags): Promise<number> {
     await ensureGlobal(paths, p);
 
     let repo: string | undefined;
-    if (flags.repo) repo = await resolveRepo(flags.repo);
+    if (flags.repo) repo = await chooseRepo({ paths, flag: flags.repo });
     else {
       const here = await repoRoot(process.cwd()).catch(() => undefined);
+      const children = here ? [] : childRepos(process.cwd());
       if (here && p.interactive && (await p.confirm(`\nAlso configure this repository (${here})?`, true))) repo = here;
-      else out(`\nTo configure a repository: ${c.bold('conductor init --repo <path>')}`);
+      else if (children.length && p.interactive) {
+        out(`\n${c.bold('Configure one of the repositories in this folder?')}`);
+        children.forEach((r, i) => out(`  ${i + 1}. ${basename(r)}`));
+        const pick = await p.ask('  number (enter to skip)', '', (v) => (!v || (/^\d+$/.test(v) && Number(v) >= 1 && Number(v) <= children.length) ? undefined : `a number from 1 to ${children.length}`));
+        if (pick) repo = children[Number(pick) - 1];
+      }
+      if (!repo) out(`\nTo configure a repository: ${c.bold('conductor init --repo <name or path>')}`);
     }
     return repo ? await initRepo(repo, paths, p, flags.force) : 0;
   } finally {
@@ -163,6 +172,7 @@ async function initRepo(repo: string, paths: Paths, p: Prompter, force: boolean)
 
   const d = await detectRepo(repo);
   out(c.dim(`  detected: ${d.stacks.join(', ') || 'nothing recognisable'}`));
+  for (const n of d.notes) out(c.dim(`  ${n}`));
   for (const w of d.warnings) out(`  ${c.yellow('!')} ${w}`);
   if (p.interactive) out(c.dim('  Enter accepts the value in [brackets]; "-" removes it; or type your own.'));
 
@@ -199,11 +209,11 @@ async function initRepo(repo: string, paths: Paths, p: Prompter, force: boolean)
   }
   if (!d.steps.length) out(`  ${c.yellow('!')} no checks: runs will have nothing to verify against`);
 
-  out(`\n  ${c.bold('Instructions')} ${c.dim("committed markdown, inlined identically into every worker's context")}`);
+  out(`\n  ${c.bold('Instructions')} ${c.dim("markdown inlined identically into every worker's context; ../ paths may point outside the repo")}`);
   d.instruction_sources = splitList(await p.ask('  files (comma-separated)', d.instruction_sources.join(', ')));
   const candidates = d.instruction_candidates.filter((f) => !d.instruction_sources.includes(f));
   if (candidates.length) {
-    out(c.dim('  skills in this repo that can be inlined too:'));
+    out(c.dim('  skills and instruction files that can be inlined too:'));
     candidates.forEach((f, i) => out(c.dim(`    ${i + 1}. ${f}`)));
     const pick = await p.ask('  inline which? (numbers, comma-separated; enter for none)', '', (v) =>
       splitList(v).every((n) => /^\d+$/.test(n) && Number(n) >= 1 && Number(n) <= candidates.length) ? undefined : `numbers between 1 and ${candidates.length}`,
@@ -223,7 +233,8 @@ async function initRepo(repo: string, paths: Paths, p: Prompter, force: boolean)
     out(`\n${c.red('the written file does not validate')}: ${(e as Error).message}\n${file}`);
     return 1;
   }
-  out(`\n${c.green('wrote')} ${file}`);
+  const known = registerRepo(paths, repo);
+  out(`\n${c.green('wrote')} ${file} ${c.dim(`(known as "${known}": --repo ${known} works from any folder)`)}`);
   for (const s of d.steps) out(c.dim(`  ${s.id.padEnd(12)} ${s.run}`));
 
   const tracked = (await git(repo, ['ls-files', '--error-unmatch', '.conductor/config.yaml'], { allowFail: true })).code === 0;

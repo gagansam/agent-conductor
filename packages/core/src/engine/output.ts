@@ -22,7 +22,7 @@ export function readRoleOutput<T>(worktree_abs: string, kind: OutputKind, final_
 export function repairPrompt(kind: OutputKind, errors: string[], raw: string, originalPrompt?: string): string {
   const out = outputSpec(kind);
   // The clarify turn is read-only: its document is the final message, not a file.
-  const viaMessage = kind === 'questions';
+  const viaMessage = kind === 'questions' || kind === 'task_draft';
   const parts = [
     `Your previous turn did not produce a valid ${viaMessage ? 'JSON document' : `\`${out.path_rel}\``}. Nothing else about your work is being questioned.`,
     '',

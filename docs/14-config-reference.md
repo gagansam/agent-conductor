@@ -164,6 +164,39 @@ routing:                                # optional per-repo override of global r
 templates: .conductor/templates         # optional overrides of implementer.md / reviewer.md / reproducer.md
 ```
 
+## Which repository a command works on
+
+`conductor run`, `task`, `tasks`, `doctor` and `init` pick the repository the
+same way, first match wins:
+
+1. `--repo <name or path>`. A name is any repository `conductor init` (or a
+   run) has seen, kept in `~/.conductor/repos.json` by folder name.
+2. The task file's `repo:` (a name, or a path relative to the task file).
+3. The git repository containing the current folder.
+4. In a folder that holds several repositories (a workspace such as
+   `field-scope/repo`), a question: "Which repository?". Without a terminal,
+   an error listing them.
+
+Saved tasks live in `~/.conductor/tasks/<repo>/<date>-<slug>.md`;
+`conductor run <name>` finds one by its full name or by the part after the date.
+
+## Instruction files outside the repository
+
+When several repositories share instructions one folder up, list them with
+`../` paths. They are read from disk when a run starts; files inside the
+repository are read from the base commit and must be committed.
+
+```yaml
+instructions:
+  sources:
+    - ../AGENTS.md
+    - ../.claude/skills/verify-change/SKILL.md
+    - ../.claude/skills/expert-review/SKILL.md
+```
+
+`conductor init` finds a workspace-level `AGENTS.md` (enabled when the repo has
+none of its own) and the workspace's `.claude/skills/*` (offered by number).
+
 ## Resolution order
 
 Global roles → repo `routing` → task `routing` → `conductor run` flags. Global loop → task `budget`.

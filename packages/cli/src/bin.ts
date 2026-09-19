@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
-import { ConfigError, ProviderError, TaskError } from '@agent-conductor/core';
+import { ConfigError, ProviderError, TaskError, UserError } from '@agent-conductor/core';
 import { apply } from './commands/apply.js';
 import { doctor } from './commands/doctor.js';
 import { init } from './commands/init.js';
 import { run } from './commands/run.js';
+import { task, tasks } from './commands/task.js';
 import { list, show } from './commands/show.js';
 
 const USAGE = `conductor — drive coding-agent CLIs through an implement → verify → review loop
@@ -16,7 +17,11 @@ const USAGE = `conductor — drive coding-agent CLIs through an implement → ve
            [--verify]                    run setup + every check in a fresh worktree at HEAD (no model calls)
            [--live <provider>]           run live conformance against a provider (uses quota)
            [--record <dir>]              save the live runs as offline fixtures
-  conductor run <task.md> [--repo <path>] [--verbose] [--no-gates] [--no-clarify] [--skip-baseline] [--json]
+  conductor task ["what should change"] [--repo <name|path>] [--manual] [--save <file>] [-i <provider/model>]
+                                         write a task by answering questions; a read-only model turn drafts it first
+                                         (--manual skips the draft). Saved under ~/.conductor/tasks/<repo>/
+  conductor tasks [--repo <name|path>]   list saved tasks
+  conductor run <task.md | saved-task | "a sentence"> [--repo <name|path>] [--verbose] [--no-gates] [--no-clarify] [--skip-baseline] [--json]
            [-i|--implementer <provider>/<model>[:<effort>]]   e.g. claude/opus:high
            [-r|--reviewer <provider>/<model>[:<effort>] | none]  e.g. codex/default, or none to skip review
                                          <model> is a label from config or a raw model id
@@ -24,6 +29,8 @@ const USAGE = `conductor — drive coding-agent CLIs through an implement → ve
   conductor show [<run>] [--advice] [--json]      <run> may be the last few characters of a run id
   conductor apply [<run>] [--3way] [--force]      apply the patch to your checkout; stages nothing
 
+Repository: --repo (a name from init, or a path), else the task's own repo:, else the repo containing this
+folder, else (in a folder of repositories) you are asked which one.
 State lives in $CONDUCTOR_HOME (default ~/.conductor). The conductor never commits, stages or pushes.
 `;
 
@@ -48,6 +55,8 @@ async function main(argv: string[]): Promise<number> {
       force: { type: 'boolean', default: false },
       yes: { type: 'boolean', short: 'y', default: false },
       verify: { type: 'boolean', default: false },
+      manual: { type: 'boolean', default: false },
+      save: { type: 'string' },
       help: { type: 'boolean', short: 'h', default: false },
     },
   });
@@ -58,9 +67,19 @@ async function main(argv: string[]): Promise<number> {
       return init({ ...(values.repo ? { repo: values.repo } : {}), yes: values.yes, force: values.force });
     case 'doctor':
       return doctor({ ...(values.repo ? { repo: values.repo } : {}), ...(values.live ? { live: values.live } : {}), ...(values.record ? { record: values.record } : {}), verify: values.verify });
+    case 'task':
+      return task(positionals.join(' ') || undefined, {
+        ...(values.repo ? { repo: values.repo } : {}),
+        manual: values.manual,
+        ...(values.save ? { save: values.save } : {}),
+        yes: values.yes,
+        ...(values.implementer ? { implementer: values.implementer } : {}),
+      });
+    case 'tasks':
+      return tasks({ ...(values.repo ? { repo: values.repo } : {}), json: values.json });
     case 'run': {
-      const file = positionals[0];
-      if (!file) return process.stderr.write('usage: conductor run <task.md>\n'), 64;
+      const file = positionals.join(' ');
+      if (!file) return process.stderr.write('usage: conductor run <task.md | saved-task | "a sentence">\n'), 64;
       return run(file, { ...(values.repo ? { repo: values.repo } : {}), verbose: values.verbose, noGates: values['no-gates'], noClarify: values['no-clarify'], skipBaseline: values['skip-baseline'], json: values.json, ...(values.implementer ? { implementer: values.implementer } : {}), ...(values.reviewer ? { reviewer: values.reviewer } : {}) });
     }
     case 'list':
@@ -84,7 +103,7 @@ process.on('warning', (w) => {
 main(process.argv.slice(2)).then(
   (code) => process.exit(code),
   (e: unknown) => {
-    const expected = e instanceof ConfigError || e instanceof TaskError || e instanceof ProviderError;
+    const expected = e instanceof ConfigError || e instanceof TaskError || e instanceof ProviderError || e instanceof UserError;
     process.stderr.write(`${expected ? (e as Error).message : e instanceof Error ? (e.stack ?? e.message) : String(e)}\n`);
     process.exit(expected ? 78 : 1);
   },

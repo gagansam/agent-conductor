@@ -65,6 +65,8 @@ export type VerificationOverride = z.infer<typeof VerificationOverrideSchema>;
 /** What the operator writes in task.md frontmatter. Everything but title and acceptance is optional. */
 export const TaskFileSchema = z.object({
   title: z.string().min(1),
+  /** The repository this task belongs to: a name the conductor knows, or a path relative to the task file. */
+  repo: z.string().optional(),
   kind: TaskKindSchema.default('feature'),
   base_ref: z.string().optional(),
   acceptance: z.array(AcceptanceCriterionSchema).min(1, 'a task needs at least one acceptance criterion'),

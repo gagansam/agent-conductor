@@ -1,5 +1,5 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import type { VerificationStep } from '../contracts/task.js';
 import { git } from '../git/exec.js';
 
@@ -26,6 +26,10 @@ export interface RepoDetection {
   instruction_sources: string[];
   /** Written commented out, for the operator to opt into. */
   instruction_candidates: string[];
+  /** Instruction files found outside the repo (e.g. ../.claude/skills/*); offered, not enabled. */
+  external_candidates: string[];
+  /** Informational lines for the operator, not problems. */
+  notes: string[];
   /** Gitignored env files found at the root; offered, never enabled by detection. */
   env_files: string[];
   /** Gitignored files the operator chose to copy into each worktree. */
@@ -46,7 +50,7 @@ const NPM_PLACEHOLDER_TEST = /no test specified/;
  * point, proven or disproven by `conductor doctor --verify`.
  */
 export async function detectRepo(repo: string): Promise<RepoDetection> {
-  const d: RepoDetection = { stacks: [], steps: [], extra_allowed_commands: [], repro_paths: [], instruction_sources: [], instruction_candidates: [], env_files: [], copy_untracked: [], warnings: [] };
+  const d: RepoDetection = { stacks: [], steps: [], extra_allowed_commands: [], repro_paths: [], instruction_sources: [], instruction_candidates: [], env_files: [], copy_untracked: [], external_candidates: [], notes: [], warnings: [] };
   const tracked = new Set((await git(repo, ['ls-files', '-z'])).stdout.split('\0').filter(Boolean));
   const has = (rel: string): boolean => existsSync(join(repo, rel));
   const setups: string[] = [];
@@ -210,11 +214,28 @@ function detectInstructions(repo: string, tracked: Set<string>, d: RepoDetection
     }
     d.instruction_sources.push(f);
   }
+  // A workspace folder holding several repos often keeps the shared instructions one level up.
+  const parent = dirname(repo);
+  const shared: string[] = [];
+  for (const f of ['AGENTS.md', 'CLAUDE.md']) {
+    const body = readText(join(parent, f)).replace(/<!--[\s\S]*?-->/g, '').trim();
+    if (body && body !== '@AGENTS.md') shared.push(`../${f}`);
+  }
+  const workspaceSkills = join(parent, '.claude', 'skills');
+  const skills = existsSync(workspaceSkills)
+    ? readdirSync(workspaceSkills).filter((s) => existsSync(join(workspaceSkills, s, 'SKILL.md'))).sort().map((s) => `../.claude/skills/${s}/SKILL.md`)
+    : [];
+  if (shared.length || skills.length) {
+    // One shared instruction file is enabled by default; any second one and the skills are offered.
+    if (!d.instruction_sources.length && shared[0]) d.instruction_sources.push(shared.shift()!);
+    d.external_candidates = [...shared, ...skills];
+    d.notes.push(`${basename(parent)}/ holds shared instructions for this repo (${[...(d.instruction_sources.filter((s) => s.startsWith('../'))), ...shared].map((s) => s.slice(3)).join(', ') || 'none'}${skills.length ? `, ${skills.length} skill(s)` : ''}); they are read from disk when a run starts`);
+  }
   if (d.instruction_sources.includes('CLAUDE.md')) {
     d.warnings.push('CLAUDE.md is inlined for both vendors. For interactive Codex use too, move it into AGENTS.md and make CLAUDE.md the single line `@AGENTS.md`');
   }
   if (!d.instruction_sources.length) d.warnings.push('no committed AGENTS.md or CLAUDE.md: workers get the task and nothing else about your conventions');
-  d.instruction_candidates = [...tracked].filter((f) => /^\.claude\/skills\/[^/]+\/SKILL\.md$/.test(f)).sort();
+  d.instruction_candidates = [...[...tracked].filter((f) => /^\.claude\/skills\/[^/]+\/SKILL\.md$/.test(f)).sort(), ...d.external_candidates];
 }
 
 /**
@@ -279,7 +300,7 @@ export function renderRepoConfig(d: RepoDetection): string {
     }
   }
   out.push('', '# Where a reviewer may add failing tests that prove a finding.', 'repro:', `  allowed_paths: [${d.repro_paths.map(q).join(', ')}]`);
-  out.push('', '# Plain markdown, inlined identically into every worker\'s context. Must be committed.', 'instructions:');
+  out.push('', "# Plain markdown, inlined identically into every worker's context. Files inside the repo must be", '# committed (runs read the base commit); ../ paths are read from disk when a run starts.', 'instructions:');
   if (!d.instruction_sources.length && !d.instruction_candidates.length) out.push('  sources: []');
   else {
     out.push('  sources:');

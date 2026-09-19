@@ -1,3 +1,7 @@
+import { spawnSync } from 'node:child_process';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createInterface, type Interface } from 'node:readline/promises';
 import { c } from './print.js';
 
@@ -50,8 +54,22 @@ export class Prompter {
     return a === '' ? def : /^y/i.test(a);
   }
 
+  /** Open $VISUAL / $EDITOR on `initial` and return what was saved. The prompt resumes afterwards. */
+  editText(initial: string): string {
+    this.rl?.close();
+    this.rl = undefined;
+    const file = join(tmpdir(), `conductor-${process.pid}-${Date.now()}.md`);
+    writeFileSync(file, initial);
+    const editor = process.env.VISUAL || process.env.EDITOR || 'vi';
+    spawnSync(`${editor} "${file}"`, { stdio: 'inherit', shell: true });
+    const text = readFileSync(file, 'utf8');
+    rmSync(file, { force: true });
+    return text.trim();
+  }
+
   close(): void {
     this.rl?.close();
+    this.rl = undefined;
   }
 
   private open(): Interface {

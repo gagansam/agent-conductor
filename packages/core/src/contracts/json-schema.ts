@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { QuestionsOutputSchema } from './clarify.js';
+import { TaskDraftSchema } from './draft.js';
 import type { Role } from './task.js';
 import { ReproOutputSchema, VerdictOutputSchema } from './verdict.js';
 import { ImplementerReportSchema } from './work-product.js';
@@ -17,13 +18,14 @@ export const PACK_DIR_REL = '.conductor/pack';
 const toJson = (schema: z.ZodType): object => z.toJSONSchema(schema, { io: 'input' }) as object;
 
 /** What a worker produces: one per role, plus the implementer's clarify turn. */
-export type OutputKind = Role | 'questions';
+export type OutputKind = Role | 'questions' | 'task_draft';
 
 const OUTPUTS: Record<OutputKind, { file: string; schema: z.ZodType }> = {
   implementer: { file: 'report.json', schema: ImplementerReportSchema },
   reviewer: { file: 'verdict.json', schema: VerdictOutputSchema },
   reproducer: { file: 'repro.json', schema: ReproOutputSchema },
   questions: { file: 'questions.json', schema: QuestionsOutputSchema },
+  task_draft: { file: 'task.json', schema: TaskDraftSchema },
 };
 
 /** The file a worker must write, and the JSON Schema it must satisfy. */

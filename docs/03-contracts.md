@@ -32,6 +32,8 @@ interface TaskSpec {
   id: string;                          // assigned by conductor
   title: string;                       // one line
   kind: TaskKind;                      // selects the workflow template
+  // In task.md the frontmatter may say `repo: <name or path>` (a name from `conductor init`, or a path relative
+  // to the task file). The CLI resolves it; the frozen spec below always holds the absolute path.
   repo: {
     path_abs: string;                  // primary checkout; v1: exactly one repo
     base_ref?: string;                 // default: HEAD of the primary checkout
@@ -385,6 +387,26 @@ interface Clarification {              // recorded per question or choice, carri
   answer: string;
   source: 'operator' | 'default';      // operator: a person saw it (Enter on the recommendation counts)
   overruled_from?: string;             // the implementer's choice, when the operator replaced it
+}
+```
+
+## 4c. TaskDraft — what `conductor task` proposes
+
+A read-only model turn in a throwaway worktree at HEAD drafts a task from
+the operator's request. Nothing is saved until the operator has gone through
+every field.
+
+```ts
+interface TaskDraft {
+  schema_version: 1;
+  title: string;
+  kind: TaskKind;
+  description: string;                 // the request made precise, in the operator's terms
+  acceptance: AcceptanceCriterion[];   // 1–5; checks must fail today and pass once met, preferably named tests
+  touch_hint: string[];
+  context_files: string[];             // repo-relative, or absolute for files in sibling repositories
+  constraints: string[];
+  notes: string;                       // ambiguities; the implementer asks about them before coding
 }
 ```
 

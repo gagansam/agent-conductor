@@ -386,6 +386,18 @@ describe('engine', () => {
     expect(steps.filter((s) => s.round === 1).map((s) => s.step_id)).toEqual(['value', 'acceptance:AC1']);
   });
 
+  it('inlines instruction files from outside the repo into every pack', async () => {
+    const { writeFileSync } = await import('node:fs');
+    writeFileSync(join(repo.root, '..', 'SHARED.md'), '# Shared\n\nWorkspace rule: keep it small.\n');
+    repo.write('.conductor/config.yaml', REPO_CONFIG.replace('sources: ["AGENTS.md"]', 'sources: ["AGENTS.md", "../SHARED.md"]'));
+    repo.run(['add', '-A']);
+    repo.run(['commit', '-q', '-m', 'shared instructions']);
+    const { summary } = await run({ implementer: [{ writes: { 'src/a.ts': 'export const a = 2;\n' }, output: REPORT }], reviewer: [{ output: APPROVE }] });
+    for (const pack of ['rounds/1/implement-0/pack', 'rounds/1/review-1/pack']) {
+      expect(readFileSync(join(summary.run_dir, pack, 'INSTRUCTIONS.md'), 'utf8')).toContain('Workspace rule: keep it small.');
+    }
+  });
+
   it('keeps files written by setup out of the patch', async () => {
     repo.write('.conductor/config.yaml', REPO_CONFIG.replace('version: 1\n', 'version: 1\nsetup:\n  run: echo generated > setup-artifact.txt\n'));
     repo.run(['add', '-A']);

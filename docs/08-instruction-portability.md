@@ -43,6 +43,13 @@ conductor:
 ---
 ```
 
+Sources may also sit outside the repository, as `../` or absolute paths. A
+workspace folder that holds several repositories and keeps one AGENTS.md and
+one `.claude/skills/` for all of them (the operator's own layout) is the case
+this serves: every repository's config points at the same files, which are
+read from disk when a run starts. Files inside the repository are read from
+the base commit instead, so the pack matches the code under work.
+
 The skill files stay where they are and keep working interactively in Claude
 Code. The conductor treats them as plain markdown with a known header.
 
